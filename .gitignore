@@ -16,3 +16,5 @@ output/*
 .idea/*
 newV2bX.sh
 quic_singbox.sh
+.DS_Store
+build_assets/
