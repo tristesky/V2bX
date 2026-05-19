@@ -11,6 +11,7 @@ import (
 	"github.com/InazumaV/V2bX/common/format"
 	"github.com/InazumaV/V2bX/conf"
 	"github.com/juju/ratelimit"
+	log "github.com/sirupsen/logrus"
 )
 
 var limitLock sync.RWMutex
@@ -24,16 +25,19 @@ type Limiter struct {
 	DomainRules   []*regexp.Regexp
 	ProtocolRules []string
 	SpeedLimit    int
+	DeviceLimit   int
 	UserOnlineIP  *sync.Map      // Key: TagUUID, value: {Key: Ip, value: Uid}
 	OldUserOnline *sync.Map      // Key: Ip, value: Uid
 	UUIDtoUID     map[string]int // Key: UUID, value: Uid
 	UserLimitInfo *sync.Map      // Key: TagUUID value: UserLimitInfo
 	SpeedLimiter  *sync.Map      // key: TagUUID, value: *ratelimit.Bucket
 	AliveList     map[int]int    // Key: Uid, value: alive_ip
+	OnlineIPStore onlineIPStore
 }
 
 type UserLimitInfo struct {
 	UID               int
+	UUID              string
 	SpeedLimit        int
 	DeviceLimit       int
 	DynamicSpeedLimit int
@@ -41,9 +45,14 @@ type UserLimitInfo struct {
 	OverLimit         bool
 }
 
-func AddLimiter(tag string, l *conf.LimitConfig, users []panel.UserInfo, aliveList map[int]int) *Limiter {
+func AddLimiter(tag string, l *conf.LimitConfig, users []panel.UserInfo, aliveList map[int]int, defaultScopes ...string) *Limiter {
+	defaultScope := ""
+	if len(defaultScopes) > 0 {
+		defaultScope = defaultScopes[0]
+	}
 	info := &Limiter{
 		SpeedLimit:    l.SpeedLimit,
+		DeviceLimit:   l.IPLimit,
 		UserOnlineIP:  new(sync.Map),
 		UserLimitInfo: new(sync.Map),
 		SpeedLimiter:  new(sync.Map),
@@ -55,6 +64,7 @@ func AddLimiter(tag string, l *conf.LimitConfig, users []panel.UserInfo, aliveLi
 		uuidmap[users[i].Uuid] = users[i].Id
 		userLimit := &UserLimitInfo{}
 		userLimit.UID = users[i].Id
+		userLimit.UUID = users[i].Uuid
 		if users[i].SpeedLimit != 0 {
 			userLimit.SpeedLimit = users[i].SpeedLimit
 		}
@@ -65,6 +75,12 @@ func AddLimiter(tag string, l *conf.LimitConfig, users []panel.UserInfo, aliveLi
 		info.UserLimitInfo.Store(format.UserTag(tag, users[i].Uuid), userLimit)
 	}
 	info.UUIDtoUID = uuidmap
+	store, err := newOnlineIPStore(l.OnlineIPLimit, defaultScope)
+	if err != nil {
+		log.WithField("tag", tag).WithError(err).Warn("init online ip limiter failed, fail-open")
+		store = failOpenOnlineIPStore{}
+	}
+	info.OnlineIPStore = store
 	limitLock.Lock()
 	limiter[tag] = info
 	limitLock.Unlock()
@@ -83,8 +99,14 @@ func GetLimiter(tag string) (info *Limiter, err error) {
 
 func DeleteLimiter(tag string) {
 	limitLock.Lock()
+	info := limiter[tag]
 	delete(limiter, tag)
 	limitLock.Unlock()
+	if info != nil && info.OnlineIPStore != nil {
+		if err := info.OnlineIPStore.Close(); err != nil {
+			log.WithField("tag", tag).WithError(err).Warn("close online ip limiter failed")
+		}
+	}
 }
 
 func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel.UserInfo) {
@@ -97,7 +119,8 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 	}
 	for i := range added {
 		userLimit := &UserLimitInfo{
-			UID: added[i].Id,
+			UID:  added[i].Id,
+			UUID: added[i].Uuid,
 		}
 		if added[i].SpeedLimit != 0 {
 			userLimit.SpeedLimit = added[i].SpeedLimit
@@ -136,6 +159,9 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool
 		u := v.(*UserLimitInfo)
 		deviceLimit = u.DeviceLimit
 		uid = u.UID
+		if deviceLimit == 0 {
+			deviceLimit = l.DeviceLimit
+		}
 		if u.ExpireTime < time.Now().Unix() && u.ExpireTime != 0 {
 			if u.SpeedLimit != 0 {
 				userLimit = u.SpeedLimit
@@ -151,37 +177,17 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool
 		return nil, true
 	}
 	if noSSUDP {
-		// Store online user for device limit
-		newipMap := new(sync.Map)
-		newipMap.Store(ip, uid)
-		aliveIp := l.AliveList[uid]
-		// If any device is online
-		if v, loaded := l.UserOnlineIP.LoadOrStore(taguuid, newipMap); loaded {
-			oldipMap := v.(*sync.Map)
-			// If this is a new ip
-			if _, loaded := oldipMap.LoadOrStore(ip, uid); !loaded {
-				if v, loaded := l.OldUserOnline.Load(ip); loaded {
-					if v.(int) == uid {
-						l.OldUserOnline.Delete(ip)
-					}
-				} else if deviceLimit > 0 {
-					if deviceLimit <= aliveIp {
-						oldipMap.Delete(ip)
-						return nil, true
-					}
-				}
+		if l.OnlineIPStore != nil && deviceLimit > 0 {
+			uuid := ""
+			if v, ok := l.UserLimitInfo.Load(taguuid); ok {
+				uuid = v.(*UserLimitInfo).UUID
 			}
-		} else if v, ok := l.OldUserOnline.Load(ip); ok {
-			if v.(int) == uid {
-				l.OldUserOnline.Delete(ip)
+			if !l.OnlineIPStore.Allow(onlineIPIdentity{UID: uid, UUID: uuid}, ip, deviceLimit) {
+				return nil, true
 			}
-		} else {
-			if deviceLimit > 0 {
-				if deviceLimit <= aliveIp {
-					l.UserOnlineIP.Delete(taguuid)
-					return nil, true
-				}
-			}
+			l.storeOnlineIP(taguuid, ip, uid)
+		} else if l.checkLocalOnlineIPLimit(taguuid, ip, uid, deviceLimit) {
+			return nil, true
 		}
 	}
 
@@ -197,6 +203,41 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool
 	} else {
 		return nil, false
 	}
+}
+
+func (l *Limiter) storeOnlineIP(taguuid string, ip string, uid int) {
+	newipMap := new(sync.Map)
+	newipMap.Store(ip, uid)
+	if v, loaded := l.UserOnlineIP.LoadOrStore(taguuid, newipMap); loaded {
+		v.(*sync.Map).Store(ip, uid)
+	}
+}
+
+func (l *Limiter) checkLocalOnlineIPLimit(taguuid string, ip string, uid int, deviceLimit int) (reject bool) {
+	newipMap := new(sync.Map)
+	newipMap.Store(ip, uid)
+	aliveIp := l.AliveList[uid]
+	if v, loaded := l.UserOnlineIP.LoadOrStore(taguuid, newipMap); loaded {
+		oldipMap := v.(*sync.Map)
+		if _, loaded := oldipMap.LoadOrStore(ip, uid); !loaded {
+			if v, loaded := l.OldUserOnline.Load(ip); loaded {
+				if v.(int) == uid {
+					l.OldUserOnline.Delete(ip)
+				}
+			} else if deviceLimit > 0 && deviceLimit <= aliveIp {
+				oldipMap.Delete(ip)
+				return true
+			}
+		}
+	} else if v, ok := l.OldUserOnline.Load(ip); ok {
+		if v.(int) == uid {
+			l.OldUserOnline.Delete(ip)
+		}
+	} else if deviceLimit > 0 && deviceLimit <= aliveIp {
+		l.UserOnlineIP.Delete(taguuid)
+		return true
+	}
+	return false
 }
 
 func (l *Limiter) GetOnlineDevice() (*[]panel.OnlineUser, error) {

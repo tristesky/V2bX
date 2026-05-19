@@ -101,7 +101,7 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 			// Remove Old limiter
 			limiter.DeleteLimiter(c.tag)
 			// Add new Limiter
-			l := limiter.AddLimiter(c.tag, &c.LimitConfig, c.userList, newA)
+			l := limiter.AddLimiter(c.tag, &c.LimitConfig, c.userList, newA, c.apiClient.APIHost)
 			c.limiter = l
 		}
 		// update alive list

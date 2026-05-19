@@ -1,9 +1,5 @@
 # V2bX
 
-[![](https://img.shields.io/badge/TgChat-UnOfficialV2Board%E4%BA%A4%E6%B5%81%E7%BE%A4-green)](https://t.me/unofficialV2board)
-[![](https://img.shields.io/badge/TgChat-YuzukiProjects%E4%BA%A4%E6%B5%81%E7%BE%A4-blue)](https://t.me/YuzukiProjects)
-
-A V2board node server based on multi core, modified from XrayR.  
 一个基于多种内核的V2board节点服务端，修改自XrayR，支持V2ay,Trojan,Shadowsocks协议。
 
 **注意： 本项目需要搭配[修改版V2board](https://github.com/wyx2685/v2board)**
@@ -63,6 +59,42 @@ GOEXPERIMENT=jsonv2 go build -v -o build_assets/V2bX -tags "sing xray hysteria2 
 ## 配置文件及详细使用教程
 
 [详细使用教程](https://v2bx.v-50.me/)
+
+### Redis 分布式在线 IP 限制
+
+`LimitConfig.OnlineIPLimit` 可以开启基于 Redis 的跨节点在线 IP 限制。不配置或 `Enable` 为 `false` 时保持原有本地限制逻辑。
+
+推荐使用 Redis 主从 + Sentinel，并让各 V2bX 节点通过 WireGuard/VPN 内网地址连接 Sentinel：
+
+```json
+"LimitConfig": {
+  "OnlineIPLimit": {
+    "Enable": true,
+    "Type": "redis",
+    "KeyPrefix": "v2bx:online_ip",
+    "TTL": 120,
+    "RefreshInterval": 20,
+    "RejectCacheTTL": 3,
+    "Timeout": 200,
+    "FailureCooldown": 30,
+    "IPv6Prefix": 128,
+    "RedisConfig": {
+      "Addresses": [
+        "10.10.0.2:26379",
+        "10.10.0.3:26379",
+        "10.10.0.4:26379"
+      ],
+      "MasterName": "mymaster",
+      "Password": "",
+      "Db": 0
+    }
+  }
+}
+```
+
+`Timeout` 单位是毫秒。Redis 或 Sentinel 不可用时会自动 fail-open 放行用户，避免 Redis 故障导致节点全站不可用；故障冷却时间由 `FailureCooldown` 控制。`Scope` 为空时默认使用面板 `ApiHost` 区分不同面板，如果多个面板共用同一组 Redis，建议为每个面板配置不同 `Scope` 或 `KeyPrefix`。
+
+完整部署步骤见 [Redis 分布式在线 IP 限制部署文档](docs/redis-online-ip.md)。
 
 ## 免责声明
 

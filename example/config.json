@@ -30,6 +30,34 @@
       "SendIP": "0.0.0.0",
       "DeviceOnlineMinTraffic": 200,
       "MinReportTraffic": 0,
+      "LimitConfig": {
+        "OnlineIPLimit": {
+          "Enable": false,
+          "Type": "redis",
+          "Scope": "",
+          "KeyPrefix": "v2bx:online_ip",
+          "TTL": 120,
+          "RefreshInterval": 20,
+          "RejectCacheTTL": 3,
+          "Timeout": 200,
+          "FailureCooldown": 30,
+          "IPv6Prefix": 128,
+          "RedisConfig": {
+            "Addresses": [
+              "10.10.0.2:26379",
+              "10.10.0.3:26379",
+              "10.10.0.4:26379"
+            ],
+            "MasterName": "mymaster",
+            "Username": "",
+            "Password": "",
+            "SentinelUsername": "",
+            "SentinelPassword": "",
+            "Db": 0,
+            "TLS": false
+          }
+        }
+      },
       "TCPFastOpen": false,
       "SniffEnabled": true,
       "CertConfig": {

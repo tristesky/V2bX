@@ -7,6 +7,7 @@ type LimitConfig struct {
 	ConnLimit               int                      `json:"ConnLimit"`
 	EnableIpRecorder        bool                     `json:"EnableIpRecorder"`
 	IpRecorderConfig        *IpReportConfig          `json:"IpRecorderConfig"`
+	OnlineIPLimit           *OnlineIPLimitConfig     `json:"OnlineIPLimit"`
 	EnableDynamicSpeedLimit bool                     `json:"EnableDynamicSpeedLimit"`
 	DynamicSpeedLimitConfig *DynamicSpeedLimitConfig `json:"DynamicSpeedLimitConfig"`
 }
@@ -18,10 +19,18 @@ type RecorderConfig struct {
 }
 
 type RedisConfig struct {
-	Address  string `json:"Address"`
-	Password string `json:"Password"`
-	Db       int    `json:"Db"`
-	Expiry   int    `json:"Expiry"`
+	Address          string   `json:"Address"`
+	Addresses        []string `json:"Addresses"`
+	MasterName       string   `json:"MasterName"`
+	Username         string   `json:"Username"`
+	Password         string   `json:"Password"`
+	SentinelUsername string   `json:"SentinelUsername"`
+	SentinelPassword string   `json:"SentinelPassword"`
+	Db               int      `json:"Db"`
+	Expiry           int      `json:"Expiry"`
+	TLS              bool     `json:"TLS"`
+	PoolSize         int      `json:"PoolSize"`
+	MinIdleConns     int      `json:"MinIdleConns"`
 }
 
 type IpReportConfig struct {
@@ -37,4 +46,18 @@ type DynamicSpeedLimitConfig struct {
 	Traffic    int64 `json:"Traffic"`
 	SpeedLimit int   `json:"SpeedLimit"`
 	ExpireTime int   `json:"ExpireTime"`
+}
+
+type OnlineIPLimitConfig struct {
+	Enable          bool         `json:"Enable"`
+	Type            string       `json:"Type"`
+	Scope           string       `json:"Scope"`
+	KeyPrefix       string       `json:"KeyPrefix"`
+	TTL             int          `json:"TTL"`
+	RefreshInterval int          `json:"RefreshInterval"`
+	RejectCacheTTL  int          `json:"RejectCacheTTL"`
+	Timeout         int          `json:"Timeout"`
+	FailureCooldown int          `json:"FailureCooldown"`
+	IPv6Prefix      int          `json:"IPv6Prefix"`
+	RedisConfig     *RedisConfig `json:"RedisConfig"`
 }

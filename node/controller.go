@@ -66,7 +66,7 @@ func (c *Controller) Start() error {
 	}
 
 	// add limiter
-	l := limiter.AddLimiter(c.tag, &c.LimitConfig, c.userList, c.aliveMap)
+	l := limiter.AddLimiter(c.tag, &c.LimitConfig, c.userList, c.aliveMap, c.apiClient.APIHost)
 	// add rule limiter
 	if err = l.UpdateRule(&node.Rules); err != nil {
 		return fmt.Errorf("update rule error: %s", err)
