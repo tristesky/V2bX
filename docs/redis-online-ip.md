@@ -126,7 +126,15 @@ wg show
 ping -c 3 10.66.0.2
 ```
 
-节点很多时，可以使用 WireGuard hub 或现成的 overlay 网络减少 peer 管理。关键要求只有一个：所有 V2bX 节点都能访问 `10.66.0.2:26379`、`10.66.0.3:26379`、`10.66.0.4:26379`。
+### WireGuard Peer 注意事项
+
+如果使用 full mesh，每一台 Redis/Sentinel 服务器都必须添加所有 V2bX 节点作为 Peer；每一台 V2bX 节点也必须添加所有 Redis/Sentinel 服务器作为 Peer。
+
+例如有 3 台 Redis/Sentinel 和 5 台 V2bX 节点，则每台 Redis/Sentinel 至少需要配置另外 2 台 Redis/Sentinel Peer，以及 5 台 V2bX 节点 Peer。每台 V2bX 节点则至少需要配置 3 台 Redis/Sentinel Peer。
+
+如果节点数量很多，建议使用 WireGuard hub 或其它 overlay 网络减少 Peer 管理。关键要求是：所有 V2bX 节点都能通过 WireGuard 内网访问每台 Redis/Sentinel 服务器的 `6379` 和 `26379` 端口。
+
+> 注意：V2bX 连接 Sentinel 后，客户端会从 Sentinel 获取当前 master 地址，然后继续连接对应 Redis master 的 `6379` 端口。所以不能只放通 `26379`，也必须放通 Redis 的 `6379`。
 
 ## 安装 Redis 和 Sentinel
 
@@ -234,6 +242,8 @@ bind 127.0.0.1 10.66.0.4
 sentinel announce-ip 10.66.0.4
 ```
 
+> 注意：`sentinel auth-pass mymaster` 是 Sentinel 连接 Redis master/replica 使用的认证，不等于客户端连接 Sentinel 本身的认证。如果希望 V2bX 连接 Sentinel 时也需要认证，需要额外配置 Redis Sentinel ACL 或 `requirepass`，并在 V2bX 中填写 `SentinelUsername` / `SentinelPassword`。
+
 启动 Sentinel：
 
 ```bash
@@ -292,6 +302,7 @@ systemctl start redis-server
 
 ```text
 Enable           是否启用 Redis 在线 IP 限制。
+Type             限制器后端类型，目前支持 redis；留空时也按 redis 处理。
 Scope            共享命名空间。同一套 V2Board 面板下的所有节点必须一致。
 KeyPrefix        Redis key 前缀。
 TTL              在线 IP 租约时间，单位秒。
@@ -353,26 +364,40 @@ IPv6Prefix = 128
 redis-cli -h 10.66.0.2 -p 26379 SENTINEL get-master-addr-by-name mymaster
 ```
 
-测试 Redis master：
+测试当前 Redis master：
 
 ```bash
-redis-cli -h 10.66.0.2 -a '<REDIS_PASSWORD>' PING
+redis-cli -h 10.66.0.2 -p 26379 SENTINEL get-master-addr-by-name mymaster
+
+MASTER_IP=$(redis-cli -h 10.66.0.2 -p 26379 --raw SENTINEL get-master-addr-by-name mymaster | head -n 1)
+redis-cli -h "$MASTER_IP" -a '<REDIS_PASSWORD>' PING
 ```
+
+初始部署时 master 通常是 `10.66.0.2`；发生故障转移后，master 可能变成 `10.66.0.3` 或 `10.66.0.4`，所以建议先从 Sentinel 查询当前 master。
 
 用户连接后查看在线 IP key：
 
 ```bash
-redis-cli -h 10.66.0.2 -a '<REDIS_PASSWORD>' --scan --pattern 'v2bx:online_ip:*'
-redis-cli -h 10.66.0.2 -a '<REDIS_PASSWORD>' ZRANGE '<key>' 0 -1 WITHSCORES
+MASTER_IP=$(redis-cli -h 10.66.0.2 -p 26379 --raw SENTINEL get-master-addr-by-name mymaster | head -n 1)
+
+redis-cli -h "$MASTER_IP" -a '<REDIS_PASSWORD>' --scan --pattern 'v2bx:online_ip:*'
+redis-cli -h "$MASTER_IP" -a '<REDIS_PASSWORD>' ZRANGE '<key>' 0 -1 WITHSCORES
 ```
 
 模拟 Redis 故障：
 
 ```bash
-systemctl stop redis-server redis-sentinel
+# 在当前 master 所在机器上执行，测试 Sentinel 是否会自动切主
+systemctl stop redis-server
+
+# 从另一台 Redis/Sentinel 机器查询新 master
+redis-cli -h 10.66.0.3 -p 26379 SENTINEL get-master-addr-by-name mymaster
+
+# 测试完成后恢复原机器 Redis
+systemctl start redis-server
 ```
 
-V2bX 应该出现类似日志：
+如果要模拟 Sentinel/Redis 全部不可用，可以在维护窗口内停止相关服务。此时 V2bX 应该出现类似日志：
 
 ```text
 online ip redis unavailable, fail-open
@@ -384,6 +409,7 @@ online ip redis unavailable, fail-open
 
 - Redis 和 Sentinel 只监听 WireGuard IP 或本机地址。
 - 公网防火墙禁止访问 `6379` 和 `26379`。
+- WireGuard 内网防火墙允许 V2bX 节点访问 Redis/Sentinel 的 `6379` 和 `26379`。
 - Redis 使用强密码或 ACL 用户。
 - WireGuard peer 尽量使用 `/32` `AllowedIPs`。
 - Redis 服务器优先选择稳定机器，不建议放在最繁忙、最容易被攻击的代理节点上。
