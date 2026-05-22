@@ -16,6 +16,7 @@ type Hysteria2node struct {
 	Logger        *zap.Logger
 	EventLogger   server.EventLogger
 	TrafficLogger server.TrafficLogger
+	packetBlocker *packetBlocker
 }
 
 func (h *Hysteria2) AddNode(tag string, info *panel.NodeInfo, config *conf.Options) error {
@@ -50,7 +51,10 @@ func (h *Hysteria2) AddNode(tag string, info *panel.NodeInfo, config *conf.Optio
 	if err != nil {
 		return err
 	}
-	hyconfig.Authenticator = h.Auth
+	hyconfig.Authenticator = &nodeAuthenticator{
+		tag:   tag,
+		users: h.Auth,
+	}
 	s, err := server.NewServer(hyconfig)
 	if err != nil {
 		return err

@@ -182,8 +182,9 @@ func (d *DefaultDispatcher) getLink(ctx context.Context, network net.Network) (*
 			return nil, nil, nil, errors.New("get limiter ", sessionInbound.Tag, " error: ", err)
 		}
 		// Speed Limit and Device Limit
+		sourceIP := sessionInbound.Source.Address.IP().String()
 		w, reject := limit.CheckLimit(user.Email,
-			sessionInbound.Source.Address.IP().String(),
+			sourceIP,
 			network == net.Network_TCP,
 			sessionInbound.Source.Network == net.Network_TCP)
 		if reject {
@@ -208,6 +209,12 @@ func (d *DefaultDispatcher) getLink(ctx context.Context, network net.Network) (*
 			manager: lm,
 		}
 		lm.AddLink(managedWriter, outboundLink.Reader)
+		if sessionInbound.Source.Network == net.Network_TCP {
+			managedWriter.onClose = limit.AcquireOnlineIPLease(user.Email, sourceIP, func() {
+				common.Close(managedWriter)
+				common.Interrupt(outboundLink.Reader)
+			})
+		}
 		inboundLink.Writer = managedWriter
 		if w != nil {
 			sessionInbound.CanSpliceCopy = 3
@@ -378,8 +385,9 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			return errors.New("get limiter ", sessionInbound.Tag, " error: ", err)
 		}
 		// Speed Limit and Device Limit
+		sourceIP := sessionInbound.Source.Address.IP().String()
 		w, reject := limit.CheckLimit(user.Email,
-			sessionInbound.Source.Address.IP().String(),
+			sourceIP,
 			destination.Network == net.Network_TCP,
 			sessionInbound.Source.Network == net.Network_TCP)
 		if reject {
@@ -400,6 +408,12 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 		managedWriter := &ManagedWriter{
 			writer:  outbound.Writer,
 			manager: lm,
+		}
+		if sessionInbound.Source.Network == net.Network_TCP {
+			managedWriter.onClose = limit.AcquireOnlineIPLease(user.Email, sourceIP, func() {
+				common.Close(managedWriter)
+				common.Interrupt(outbound.Reader)
+			})
 		}
 		outbound.Writer = managedWriter
 		if w != nil {

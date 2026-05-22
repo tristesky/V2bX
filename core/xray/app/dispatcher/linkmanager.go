@@ -8,8 +8,10 @@ import (
 )
 
 type ManagedWriter struct {
-	writer  buf.Writer
-	manager *LinkManager
+	writer    buf.Writer
+	manager   *LinkManager
+	onClose   func()
+	closeOnce sync.Once
 }
 
 func (w *ManagedWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
@@ -18,6 +20,11 @@ func (w *ManagedWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 
 func (w *ManagedWriter) Close() error {
 	w.manager.RemoveWriter(w)
+	w.closeOnce.Do(func() {
+		if w.onClose != nil {
+			w.onClose()
+		}
+	})
 	return common.Close(w.writer)
 }
 

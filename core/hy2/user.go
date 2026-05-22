@@ -6,7 +6,9 @@ import (
 
 	"github.com/InazumaV/V2bX/api/panel"
 	"github.com/InazumaV/V2bX/common/counter"
+	"github.com/InazumaV/V2bX/common/format"
 	vCore "github.com/InazumaV/V2bX/core"
+	"github.com/InazumaV/V2bX/limiter"
 	"github.com/apernet/hysteria/core/v2/server"
 )
 
@@ -17,6 +19,11 @@ type V2bX struct {
 	mutex    sync.RWMutex
 }
 
+type nodeAuthenticator struct {
+	tag   string
+	users *V2bX
+}
+
 func (v *V2bX) Authenticate(addr net.Addr, auth string, tx uint64) (ok bool, id string) {
 	v.mutex.RLock()
 	defer v.mutex.RUnlock()
@@ -24,6 +31,21 @@ func (v *V2bX) Authenticate(addr net.Addr, auth string, tx uint64) (ok bool, id 
 		return true, auth
 	}
 	return false, ""
+}
+
+func (a *nodeAuthenticator) Authenticate(addr net.Addr, auth string, tx uint64) (ok bool, id string) {
+	if ok, id = a.users.Authenticate(addr, auth, tx); !ok {
+		return false, ""
+	}
+
+	limiterinfo, err := limiter.GetLimiter(a.tag)
+	if err != nil {
+		return true, id
+	}
+	if _, reject := limiterinfo.CheckLimit(format.UserTag(a.tag, id), extractIPFromAddr(addr), false, true); reject {
+		return false, ""
+	}
+	return true, id
 }
 
 func (h *Hysteria2) AddUsers(p *vCore.AddUsersParams) (added int, err error) {

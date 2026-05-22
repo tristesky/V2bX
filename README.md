@@ -2,7 +2,7 @@
 
 一个基于多种内核的V2board节点服务端，修改自XrayR，支持V2ay,Trojan,Shadowsocks协议。
 
-**注意： 本项目需要搭配[修改版V2board](https://github.com/wyx2685/v2board)**
+**注意： 本项目需要搭配[修改版V2board](https://github.com/tristesky/V2bX)**
 
 ## 特点
 
@@ -92,7 +92,7 @@ GOEXPERIMENT=jsonv2 go build -v -o build_assets/V2bX -tags "sing xray hysteria2 
 }
 ```
 
-`Timeout` 单位是毫秒。Redis 或 Sentinel 不可用时会自动 fail-open 放行用户，避免 Redis 故障导致节点全站不可用；故障冷却时间由 `FailureCooldown` 控制。`Scope` 为空时默认使用面板 `ApiHost` 区分不同面板，如果多个面板共用同一组 Redis，建议为每个面板配置不同 `Scope` 或 `KeyPrefix`。
+`Timeout` 单位是毫秒。Redis 或 Sentinel 不可用时会自动 fail-open 放行用户，避免 Redis 故障导致节点全站不可用；故障冷却时间由 `FailureCooldown` 控制。Xray TCP 入站和 Hysteria2 客户端连接在存活期间会按 `RefreshInterval` 续租在线 IP，避免长连接只做一次检查后在 Redis 中自然过期；Redis 恢复后如果活跃 IP 超限，会优先清退最新进入的 IP。`Scope` 为空时默认使用面板 `ApiHost` 区分不同面板，如果多个面板共用同一组 Redis，建议为每个面板配置不同 `Scope` 或 `KeyPrefix`。
 
 完整部署步骤见 [Redis 分布式在线 IP 限制部署文档](docs/redis-online-ip.md)。
 

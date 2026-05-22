@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 
 	"github.com/InazumaV/V2bX/common/format"
 	"github.com/InazumaV/V2bX/limiter"
@@ -12,8 +13,10 @@ import (
 )
 
 type serverLogger struct {
-	Tag    string
-	logger *zap.Logger
+	Tag            string
+	logger         *zap.Logger
+	onlineIPLeases sync.Map
+	packetBlocker  *packetBlocker
 }
 
 var logLevelMap = map[string]zapcore.Level{
@@ -51,7 +54,9 @@ func (l *serverLogger) Connect(addr net.Addr, uuid string, tx uint64) {
 	if err != nil {
 		l.logger.Panic("Get limiter error", zap.String("tag", l.Tag), zap.Error(err))
 	}
-	if _, r := limiterinfo.CheckLimit(format.UserTag(l.Tag, uuid), extractIPFromAddr(addr), addr.Network() == "tcp", true); r {
+	taguuid := format.UserTag(l.Tag, uuid)
+	ip := extractIPFromAddr(addr)
+	if _, r := limiterinfo.CheckLimit(taguuid, ip, addr.Network() == "tcp", true); r {
 		if userLimit, ok := limiterinfo.UserLimitInfo.Load(format.UserTag(l.Tag, uuid)); ok {
 			userLimit.(*limiter.UserLimitInfo).OverLimit = true
 		}
@@ -59,11 +64,15 @@ func (l *serverLogger) Connect(addr net.Addr, uuid string, tx uint64) {
 		if userLimit, ok := limiterinfo.UserLimitInfo.Load(format.UserTag(l.Tag, uuid)); ok {
 			userLimit.(*limiter.UserLimitInfo).OverLimit = false
 		}
+		l.storeOnlineIPLease(addr, uuid, limiterinfo.AcquireOnlineIPLease(taguuid, ip, func() {
+			l.packetBlocker.Block(addr)
+		}))
 	}
 	l.logger.Info("client connected", zap.String("addr", addr.String()), zap.String("uuid", uuid), zap.Uint64("tx", tx))
 }
 
 func (l *serverLogger) Disconnect(addr net.Addr, uuid string, err error) {
+	l.releaseOnlineIPLease(addr, uuid)
 	l.logger.Info("client disconnected", zap.String("addr", addr.String()), zap.String("uuid", uuid), zap.Error(err))
 }
 
@@ -153,4 +162,22 @@ func extractIPFromAddr(addr net.Addr) string {
 	default:
 		return ""
 	}
+}
+
+func (l *serverLogger) storeOnlineIPLease(addr net.Addr, uuid string, release func()) {
+	key := hy2OnlineIPLeaseKey(addr, uuid)
+	if old, ok := l.onlineIPLeases.LoadAndDelete(key); ok {
+		old.(func())()
+	}
+	l.onlineIPLeases.Store(key, release)
+}
+
+func (l *serverLogger) releaseOnlineIPLease(addr net.Addr, uuid string) {
+	if release, ok := l.onlineIPLeases.LoadAndDelete(hy2OnlineIPLeaseKey(addr, uuid)); ok {
+		release.(func())()
+	}
+}
+
+func hy2OnlineIPLeaseKey(addr net.Addr, uuid string) string {
+	return uuid + "|" + addr.String()
 }

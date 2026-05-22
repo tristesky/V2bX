@@ -22,17 +22,18 @@ func Init() {
 }
 
 type Limiter struct {
-	DomainRules   []*regexp.Regexp
-	ProtocolRules []string
-	SpeedLimit    int
-	DeviceLimit   int
-	UserOnlineIP  *sync.Map      // Key: TagUUID, value: {Key: Ip, value: Uid}
-	OldUserOnline *sync.Map      // Key: Ip, value: Uid
-	UUIDtoUID     map[string]int // Key: UUID, value: Uid
-	UserLimitInfo *sync.Map      // Key: TagUUID value: UserLimitInfo
-	SpeedLimiter  *sync.Map      // key: TagUUID, value: *ratelimit.Bucket
-	AliveList     map[int]int    // Key: Uid, value: alive_ip
-	OnlineIPStore onlineIPStore
+	DomainRules    []*regexp.Regexp
+	ProtocolRules  []string
+	SpeedLimit     int
+	DeviceLimit    int
+	UserOnlineIP   *sync.Map      // Key: TagUUID, value: {Key: Ip, value: Uid}
+	OldUserOnline  *sync.Map      // Key: Ip, value: Uid
+	UUIDtoUID      map[string]int // Key: UUID, value: Uid
+	UserLimitInfo  *sync.Map      // Key: TagUUID value: UserLimitInfo
+	SpeedLimiter   *sync.Map      // key: TagUUID, value: *ratelimit.Bucket
+	AliveList      map[int]int    // Key: Uid, value: alive_ip
+	OnlineIPStore  onlineIPStore
+	onlineIPLeases *onlineIPLeaseTracker
 }
 
 type UserLimitInfo struct {
@@ -81,6 +82,7 @@ func AddLimiter(tag string, l *conf.LimitConfig, users []panel.UserInfo, aliveLi
 		store = failOpenOnlineIPStore{}
 	}
 	info.OnlineIPStore = store
+	info.onlineIPLeases = newOnlineIPLeaseTracker(store)
 	limitLock.Lock()
 	limiter[tag] = info
 	limitLock.Unlock()
@@ -102,6 +104,11 @@ func DeleteLimiter(tag string) {
 	info := limiter[tag]
 	delete(limiter, tag)
 	limitLock.Unlock()
+	if info != nil {
+		if info.onlineIPLeases != nil {
+			info.onlineIPLeases.Close()
+		}
+	}
 	if info != nil && info.OnlineIPStore != nil {
 		if err := info.OnlineIPStore.Close(); err != nil {
 			log.WithField("tag", tag).WithError(err).Warn("close online ip limiter failed")
@@ -211,6 +218,28 @@ func (l *Limiter) storeOnlineIP(taguuid string, ip string, uid int) {
 	if v, loaded := l.UserOnlineIP.LoadOrStore(taguuid, newipMap); loaded {
 		v.(*sync.Map).Store(ip, uid)
 	}
+}
+
+func (l *Limiter) AcquireOnlineIPLease(taguuid string, ip string, disconnect func()) func() {
+	if l.onlineIPLeases == nil {
+		return noopOnlineIPLeaseRelease
+	}
+
+	v, ok := l.UserLimitInfo.Load(taguuid)
+	if !ok {
+		return noopOnlineIPLeaseRelease
+	}
+
+	u := v.(*UserLimitInfo)
+	deviceLimit := u.DeviceLimit
+	if deviceLimit == 0 {
+		deviceLimit = l.DeviceLimit
+	}
+	if deviceLimit <= 0 {
+		return noopOnlineIPLeaseRelease
+	}
+
+	return l.onlineIPLeases.Acquire(onlineIPIdentity{UID: u.UID, UUID: u.UUID}, strings.TrimPrefix(ip, "::ffff:"), deviceLimit, disconnect)
 }
 
 func (l *Limiter) checkLocalOnlineIPLimit(taguuid string, ip string, uid int, deviceLimit int) (reject bool) {

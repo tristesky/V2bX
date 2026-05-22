@@ -23,29 +23,77 @@ const defaultOnlineIPKeyPrefix = "v2bx:online_ip"
 
 var redisOnlineIPScript = redis.NewScript(`
 local key = KEYS[1]
+local order_key = KEYS[2]
 local now = tonumber(ARGV[1])
-local ttl = tonumber(ARGV[2])
-local expire = tonumber(ARGV[3])
-local limit = tonumber(ARGV[4])
-local ip = ARGV[5]
+local admitted_at = tonumber(ARGV[2])
+local ttl = tonumber(ARGV[3])
+local expire = tonumber(ARGV[4])
+local limit = tonumber(ARGV[5])
+local ip = ARGV[6]
 
+local expired = redis.call("ZRANGEBYSCORE", key, 0, now - ttl)
+for _, member in ipairs(expired) do
+	redis.call("ZREM", order_key, member)
+end
 redis.call("ZREMRANGEBYSCORE", key, 0, now - ttl)
 
 if redis.call("ZSCORE", key, ip) then
 	redis.call("ZADD", key, now, ip)
+	redis.call("ZADD", order_key, "NX", admitted_at, ip)
 	redis.call("PEXPIRE", key, expire)
+	redis.call("PEXPIRE", order_key, expire)
 	return {1, redis.call("ZCARD", key)}
 end
 
 local count = redis.call("ZCARD", key)
 if count < limit then
 	redis.call("ZADD", key, now, ip)
+	redis.call("ZADD", order_key, admitted_at, ip)
 	redis.call("PEXPIRE", key, expire)
+	redis.call("PEXPIRE", order_key, expire)
 	return {1, count + 1}
 end
 
 redis.call("PEXPIRE", key, expire)
+redis.call("PEXPIRE", order_key, expire)
 return {0, count}
+`)
+
+var redisOnlineIPRenewScript = redis.NewScript(`
+local key = KEYS[1]
+local order_key = KEYS[2]
+local now = tonumber(ARGV[1])
+local admitted_at = tonumber(ARGV[2])
+local ttl = tonumber(ARGV[3])
+local expire = tonumber(ARGV[4])
+local limit = tonumber(ARGV[5])
+local ip = ARGV[6]
+
+local expired = redis.call("ZRANGEBYSCORE", key, 0, now - ttl)
+for _, member in ipairs(expired) do
+	redis.call("ZREM", order_key, member)
+end
+redis.call("ZREMRANGEBYSCORE", key, 0, now - ttl)
+redis.call("ZADD", key, now, ip)
+redis.call("ZADD", order_key, "NX", admitted_at, ip)
+
+local allowed = 1
+local count = redis.call("ZCARD", key)
+if limit > 0 and count > limit then
+	local excess = count - limit
+	local dropped = redis.call("ZREVRANGE", order_key, 0, excess - 1)
+	for _, member in ipairs(dropped) do
+		redis.call("ZREM", key, member)
+		redis.call("ZREM", order_key, member)
+		if member == ip then
+			allowed = 0
+		end
+	end
+end
+
+redis.call("PEXPIRE", key, expire)
+redis.call("PEXPIRE", order_key, expire)
+return {allowed, redis.call("ZCARD", key)}
 `)
 
 type onlineIPIdentity struct {
@@ -55,6 +103,8 @@ type onlineIPIdentity struct {
 
 type onlineIPStore interface {
 	Allow(identity onlineIPIdentity, ip string, limit int) bool
+	Renew(identity onlineIPIdentity, ip string, limit int, admittedAtUnixMicro int64) bool
+	RenewInterval() time.Duration
 	Close() error
 }
 
@@ -62,6 +112,14 @@ type failOpenOnlineIPStore struct{}
 
 func (failOpenOnlineIPStore) Allow(identity onlineIPIdentity, ip string, limit int) bool {
 	return true
+}
+
+func (failOpenOnlineIPStore) Renew(identity onlineIPIdentity, ip string, limit int, admittedAtUnixMicro int64) bool {
+	return true
+}
+
+func (failOpenOnlineIPStore) RenewInterval() time.Duration {
+	return 0
 }
 
 func (failOpenOnlineIPStore) Close() error {
@@ -186,7 +244,7 @@ func (s *redisOnlineIPStore) Allow(identity onlineIPIdentity, ip string, limit i
 
 	normalizedIP := normalizeOnlineIP(ip, s.ipv6Prefix)
 	key := s.redisKey(identity)
-	cacheKey := key + "|" + normalizedIP + "|" + strconv.Itoa(limit)
+	cacheKey := s.allowCacheKey(key, normalizedIP, limit)
 	if allowed, ok := s.cacheGet(cacheKey); ok {
 		return allowed
 	}
@@ -195,8 +253,9 @@ func (s *redisOnlineIPStore) Allow(identity onlineIPIdentity, ip string, limit i
 	defer cancel()
 
 	now := time.Now().UnixMilli()
-	res, err := redisOnlineIPScript.Run(ctx, s.client, []string{key},
+	res, err := redisOnlineIPScript.Run(ctx, s.client, []string{key, s.redisOrderKey(identity)},
 		now,
+		time.Now().UnixMicro(),
 		s.ttl.Milliseconds(),
 		s.expire.Milliseconds(),
 		limit,
@@ -221,6 +280,42 @@ func (s *redisOnlineIPStore) Allow(identity onlineIPIdentity, ip string, limit i
 	return allowed
 }
 
+func (s *redisOnlineIPStore) Renew(identity onlineIPIdentity, ip string, limit int, admittedAtUnixMicro int64) bool {
+	if time.Now().UnixNano() < s.failUntil.Load() {
+		return true
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	defer cancel()
+
+	res, err := redisOnlineIPRenewScript.Run(ctx, s.client, []string{s.redisKey(identity), s.redisOrderKey(identity)},
+		time.Now().UnixMilli(),
+		admittedAtUnixMicro,
+		s.ttl.Milliseconds(),
+		s.expire.Milliseconds(),
+		limit,
+		normalizeOnlineIP(ip, s.ipv6Prefix),
+	).Result()
+	if err != nil {
+		s.markFailure(err)
+		return true
+	}
+
+	allowed, err := parseRedisOnlineIPResult(res)
+	if err != nil {
+		s.markFailure(err)
+		return true
+	}
+	if !allowed {
+		s.cache.Delete(s.allowCacheKey(s.redisKey(identity), normalizeOnlineIP(ip, s.ipv6Prefix), limit))
+	}
+	return allowed
+}
+
+func (s *redisOnlineIPStore) RenewInterval() time.Duration {
+	return s.refreshInterval
+}
+
 func (s *redisOnlineIPStore) Close() error {
 	if s == nil || s.client == nil {
 		return nil
@@ -234,6 +329,14 @@ func (s *redisOnlineIPStore) redisKey(identity onlineIPIdentity) string {
 		userKey = shortHash(identity.UUID)
 	}
 	return s.keyPrefix + ":" + s.scopeHash + ":" + userKey
+}
+
+func (s *redisOnlineIPStore) redisOrderKey(identity onlineIPIdentity) string {
+	return s.redisKey(identity) + ":order"
+}
+
+func (s *redisOnlineIPStore) allowCacheKey(key string, normalizedIP string, limit int) string {
+	return key + "|" + normalizedIP + "|" + strconv.Itoa(limit)
 }
 
 func (s *redisOnlineIPStore) cacheGet(key string) (bool, bool) {

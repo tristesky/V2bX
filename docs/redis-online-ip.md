@@ -35,6 +35,12 @@ uid + source_ip + device_limit -> Redis Lua 原子检查 -> 放行或拒绝
 
 如果 Redis 或 Sentinel 不可用，V2bX 会 fail-open 直接放行，避免 Redis 故障导致节点全站不可用。
 
+Redis 中保存的是带 TTL 的在线 IP 租约，不是一次写入后永久存在的名单。Xray TCP 入站和 Hysteria2 客户端连接会在连接存活期间按 `RefreshInterval` 定期续租；连接断开后停止续租，租约会在 `TTL` 到期后自然清理。这样一个已经在线的 IP 不会因为长连接很久没有再次触发入口检查而被 Redis 提前忘掉。
+
+fail-open 仍然优先保证节点可用性：Redis 故障期间可能会暂时放进超限连接。Redis 恢复后，活跃租约续租会重新比较限制数量，超出的最新 IP 会从 Redis 中淘汰，并由持有该租约的节点清退对应连接。
+
+这里的“最新”按节点首次持有该在线 IP 租约的时间排序。Xray 会关闭该 IP 在本节点上的活跃连接；Hysteria2 会阻断被淘汰连接的远端 UDP 地址一小段时间，让 QUIC 连接退出，再次重连时仍要重新经过认证和 Redis 检查。Hysteria2 超限的新连接会在认证入口直接拒绝，不再先认证成功后等待后续流量回调。
+
 ## 端口
 
 这些端口只应该在 WireGuard 内网可访问：
@@ -306,7 +312,7 @@ Type             限制器后端类型，目前支持 redis；留空时也按 re
 Scope            共享命名空间。同一套 V2Board 面板下的所有节点必须一致。
 KeyPrefix        Redis key 前缀。
 TTL              在线 IP 租约时间，单位秒。
-RefreshInterval  本地放行缓存时间，单位秒。越小越严格，越大 Redis 请求越少。
+RefreshInterval  本地放行缓存时间和活跃 Xray TCP/Hysteria2 连接续租间隔，单位秒。越小越严格，越大 Redis 请求越少。
 RejectCacheTTL   被拒绝 IP 的短缓存时间，单位秒。
 Timeout          Redis 操作超时，单位毫秒。
 FailureCooldown  Redis 出错后 fail-open 熔断时间，单位秒。
@@ -314,6 +320,45 @@ IPv6Prefix       128 表示完整 IPv6；64 表示按 /64 统计。
 Addresses        Sentinel 的 WireGuard 内网地址，不是公网地址。
 MasterName       Sentinel master 名称。
 Password         Redis master 密码。
+```
+
+### 例如：
+
+```bash
+{
+  "Core": "sing",
+  "ApiHost": "https://你的面板地址",
+  "ApiKey": "xxx",
+  "NodeID": 1,
+  "NodeType": "shadowsocks",
+  "Timeout": 30,
+
+  "LimitConfig": {
+    "OnlineIPLimit": {
+      "Enable": true,
+      "Type": "redis",
+      "Scope": "main-v2board",
+      "KeyPrefix": "v2bx:online_ip",
+      "TTL": 120,
+      "RefreshInterval": 20,
+      "RejectCacheTTL": 3,
+      "Timeout": 200,
+      "FailureCooldown": 30,
+      "IPv6Prefix": 128,
+      "RedisConfig": {
+        "Addresses": [
+          "10.66.0.2:26379",
+          "10.66.0.3:26379",
+          "10.66.0.4:26379"
+        ],
+        "MasterName": "mymaster",
+        "Password": "你的Redis密码",
+        "Db": 0,
+        "TLS": false
+      }
+    }
+  }
+}
 ```
 
 如果 Redis 使用 ACL 用户，也可以配置：
