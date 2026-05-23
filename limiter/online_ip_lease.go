@@ -4,6 +4,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/InazumaV/V2bX/api/panel"
 )
 
 var noopOnlineIPLeaseRelease = func() {}
@@ -135,6 +137,25 @@ func (t *onlineIPLeaseTracker) snapshot() []onlineIPLease {
 		})
 	}
 	return leases
+}
+
+func (t *onlineIPLeaseTracker) OnlineDevices() []panel.OnlineUser {
+	if t == nil {
+		return nil
+	}
+
+	leases := t.snapshot()
+	onlineUsers := make([]panel.OnlineUser, 0, len(leases))
+	for _, lease := range leases {
+		if lease.identity.UID == 0 {
+			continue
+		}
+		onlineUsers = append(onlineUsers, panel.OnlineUser{
+			UID: lease.identity.UID,
+			IP:  lease.ip,
+		})
+	}
+	return onlineUsers
 }
 
 func (t *onlineIPLeaseTracker) disconnect(key string) {

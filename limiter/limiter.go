@@ -270,6 +270,23 @@ func (l *Limiter) checkLocalOnlineIPLimit(taguuid string, ip string, uid int, de
 }
 
 func (l *Limiter) GetOnlineDevice() (*[]panel.OnlineUser, error) {
+	if l.onlineIPLeases != nil {
+		onlineUser := l.onlineIPLeases.OnlineDevices()
+		l.clearLocalOnlineDeviceSnapshot()
+		return &onlineUser, nil
+	}
+	return l.getLocalOnlineDevice()
+}
+
+func (l *Limiter) clearLocalOnlineDeviceSnapshot() {
+	l.OldUserOnline = new(sync.Map)
+	l.UserOnlineIP.Range(func(key, value interface{}) bool {
+		l.UserOnlineIP.Delete(key)
+		return true
+	})
+}
+
+func (l *Limiter) getLocalOnlineDevice() (*[]panel.OnlineUser, error) {
 	var onlineUser []panel.OnlineUser
 	l.OldUserOnline = new(sync.Map)
 	l.UserOnlineIP.Range(func(key, value interface{}) bool {

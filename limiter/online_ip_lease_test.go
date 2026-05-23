@@ -86,3 +86,23 @@ func TestOnlineIPLeaseTrackerDisconnectsRejectedRenewal(t *testing.T) {
 		t.Fatalf("renewals after rejected lease removal = %d, want 1", len(renewals))
 	}
 }
+
+func TestOnlineIPLeaseTrackerOnlineDevices(t *testing.T) {
+	store := &fakeOnlineIPLeaseStore{interval: time.Hour}
+	tracker := newOnlineIPLeaseTracker(store)
+	defer tracker.Close()
+
+	release := tracker.Acquire(onlineIPIdentity{UID: 11}, "192.0.2.11", 2, nil)
+	devices := tracker.OnlineDevices()
+	if len(devices) != 1 {
+		t.Fatalf("online devices = %d, want 1", len(devices))
+	}
+	if devices[0].UID != 11 || devices[0].IP != "192.0.2.11" {
+		t.Fatalf("online device = %+v, want UID 11 IP 192.0.2.11", devices[0])
+	}
+
+	release()
+	if devices := tracker.OnlineDevices(); len(devices) != 0 {
+		t.Fatalf("online devices after release = %d, want 0", len(devices))
+	}
+}
