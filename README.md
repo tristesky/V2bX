@@ -60,9 +60,10 @@ GOEXPERIMENT=jsonv2 go build -v -o build_assets/V2bX -tags "sing xray hysteria2 
 
 [详细使用教程](https://v2bx.v-50.me/)
 
-### Redis 分布式在线 IP 限制
+### Redis 分布式在线 IP 与活跃节点限制
 
 `LimitConfig.OnlineIPLimit` 可以开启基于 Redis 的跨节点在线 IP 限制。不配置或 `Enable` 为 `false` 时保持原有本地限制逻辑。
+`LimitConfig.ActiveNodeLimit` 可以进一步限制同一用户长期同时使用的节点数量：短时间测速连接不会正式占位，持续超限的节点会被清退并进入冷却拒绝状态。
 
 推荐使用 Redis 主从 + Sentinel，并让各 V2bX 节点通过 WireGuard/VPN 内网地址连接 Sentinel：
 
@@ -88,11 +89,18 @@ GOEXPERIMENT=jsonv2 go build -v -o build_assets/V2bX -tags "sing xray hysteria2 
       "Password": "",
       "Db": 0
     }
+  },
+  "ActiveNodeLimit": {
+    "Enable": true,
+    "Limit": 0,
+    "ActivationDelay": 60,
+    "BlockTTL": 600,
+    "KeyPrefix": "v2bx:active_node"
   }
 }
 ```
 
-`Timeout` 单位是毫秒。Redis 或 Sentinel 不可用时会自动 fail-open 放行用户，避免 Redis 故障导致节点全站不可用；故障冷却时间由 `FailureCooldown` 控制。Xray TCP 入站和 Hysteria2 客户端连接在存活期间会按 `RefreshInterval` 续租在线 IP，避免长连接只做一次检查后在 Redis 中自然过期；Redis 恢复后如果活跃 IP 超限，会优先清退最新进入的 IP。`Scope` 为空时默认使用面板 `ApiHost` 区分不同面板，如果多个面板共用同一组 Redis，建议为每个面板配置不同 `Scope` 或 `KeyPrefix`。
+`ActiveNodeLimit.Limit` 为 `0` 时自动使用面板给每个用户下发的 `device_limit`，无需按套餐在节点手工配置数字。Redis/Sentinel 不可用时两种分布式限制都 fail-open，避免 Redis 故障导致全站不可用。`ActiveNodeLimit` 未填写 Redis 参数时会继承 `OnlineIPLimit` 的连接和超时配置，但使用独立 Redis key。
 
 完整部署步骤见 [Redis 分布式在线 IP 限制部署文档](docs/redis-online-ip.md)。
 

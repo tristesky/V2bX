@@ -8,6 +8,7 @@ type LimitConfig struct {
 	EnableIpRecorder        bool                     `json:"EnableIpRecorder"`
 	IpRecorderConfig        *IpReportConfig          `json:"IpRecorderConfig"`
 	OnlineIPLimit           *OnlineIPLimitConfig     `json:"OnlineIPLimit"`
+	ActiveNodeLimit         *ActiveNodeLimitConfig   `json:"ActiveNodeLimit"`
 	EnableDynamicSpeedLimit bool                     `json:"EnableDynamicSpeedLimit"`
 	DynamicSpeedLimitConfig *DynamicSpeedLimitConfig `json:"DynamicSpeedLimitConfig"`
 }
@@ -59,5 +60,21 @@ type OnlineIPLimitConfig struct {
 	Timeout         int          `json:"Timeout"`
 	FailureCooldown int          `json:"FailureCooldown"`
 	IPv6Prefix      int          `json:"IPv6Prefix"`
+	RedisConfig     *RedisConfig `json:"RedisConfig"`
+}
+
+type ActiveNodeLimitConfig struct {
+	Enable          bool         `json:"Enable"`
+	Type            string       `json:"Type"`
+	Limit           int          `json:"Limit"`
+	ActivationDelay int          `json:"ActivationDelay"`
+	BlockTTL        int          `json:"BlockTTL"`
+	Scope           string       `json:"Scope"`
+	KeyPrefix       string       `json:"KeyPrefix"`
+	TTL             int          `json:"TTL"`
+	RefreshInterval int          `json:"RefreshInterval"`
+	RejectCacheTTL  int          `json:"RejectCacheTTL"`
+	Timeout         int          `json:"Timeout"`
+	FailureCooldown int          `json:"FailureCooldown"`
 	RedisConfig     *RedisConfig `json:"RedisConfig"`
 }

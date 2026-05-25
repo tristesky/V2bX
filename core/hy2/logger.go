@@ -64,9 +64,15 @@ func (l *serverLogger) Connect(addr net.Addr, uuid string, tx uint64) {
 		if userLimit, ok := limiterinfo.UserLimitInfo.Load(format.UserTag(l.Tag, uuid)); ok {
 			userLimit.(*limiter.UserLimitInfo).OverLimit = false
 		}
-		l.storeOnlineIPLease(addr, uuid, limiterinfo.AcquireOnlineIPLease(taguuid, ip, func() {
+		disconnect := func() {
 			l.packetBlocker.Block(addr)
-		}))
+		}
+		releaseOnlineIP := limiterinfo.AcquireOnlineIPLease(taguuid, ip, disconnect)
+		releaseActiveNode := limiterinfo.AcquireActiveNodeLease(taguuid, disconnect)
+		l.storeOnlineIPLease(addr, uuid, func() {
+			releaseOnlineIP()
+			releaseActiveNode()
+		})
 	}
 	l.logger.Info("client connected", zap.String("addr", addr.String()), zap.String("uuid", uuid), zap.Uint64("tx", tx))
 }

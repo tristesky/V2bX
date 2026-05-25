@@ -1,6 +1,6 @@
-# Redis 分布式在线 IP 限制部署文档
+# Redis 分布式在线 IP 与活跃节点限制部署文档
 
-本文档说明如何部署 Redis 主从 + Sentinel，并通过 WireGuard 内网为 V2bX 提供分布式在线 IP 限制。
+本文档说明如何部署 Redis 主从 + Sentinel，并通过 WireGuard 内网为 V2bX 提供分布式在线 IP 和长期活跃节点限制。
 
 ## 架构
 
@@ -35,11 +35,30 @@ uid + source_ip + device_limit -> Redis Lua 原子检查 -> 放行或拒绝
 
 如果 Redis 或 Sentinel 不可用，V2bX 会 fail-open 直接放行，避免 Redis 故障导致节点全站不可用。
 
-Redis 中保存的是带 TTL 的在线 IP 租约，不是一次写入后永久存在的名单。Xray TCP 入站和 Hysteria2 客户端连接会在连接存活期间按 `RefreshInterval` 定期续租；连接断开后停止续租，租约会在 `TTL` 到期后自然清理。这样一个已经在线的 IP 不会因为长连接很久没有再次触发入口检查而被 Redis 提前忘掉。
+可选开启 `LimitConfig.ActiveNodeLimit.Enable`，处理一个公网 IP 同时长期挂在很多节点上的共享场景：
 
-fail-open 仍然优先保证节点可用性：Redis 故障期间可能会暂时放进超限连接。Redis 恢复后，活跃租约续租会重新比较限制数量，超出的最新 IP 会从 Redis 中淘汰，并由持有该租约的节点清退对应连接。
+```text
+uid + stable_node_id + active_node_limit -> Redis Lua 原子检查 -> 放行、观察或拒绝
+```
 
-这里的“最新”按节点首次持有该在线 IP 租约的时间排序。Xray 会关闭该 IP 在本节点上的活跃连接；Hysteria2 会阻断被淘汰连接的远端 UDP 地址一小段时间，让 QUIC 连接退出，再次重连时仍要重新经过认证和 Redis 检查。Hysteria2 超限的新连接会在认证入口直接拒绝，不再先认证成功后等待后续流量回调。
+`stable_node_id` 由面板地址、节点类型和节点 ID 组成。同一用户在同一个节点的多条连接只计一个活跃节点；换到不同节点才会增加计数。因此该功能限制的是长期活跃节点，不是真实物理设备数量。
+
+`ActiveNodeLimit.Limit` 为 `0` 时，自动使用面板下发给每个用户的 `device_limit`。例如套餐限制为 `3` 的用户最多保留 3 个长期活跃节点，套餐限制为 `15` 的用户最多保留 15 个，无需在节点配置中逐个用户维护数字。
+
+活跃节点使用两阶段策略，减少测速误伤和循环断线：
+
+```text
+新节点连接 -> 本机观察 ActivationDelay 秒
+短时间测速结束 -> 不写入正式活跃节点集合
+持续在线 -> 申请 Redis 正式名额
+超限 -> 清退该节点，并在 BlockTTL 内进入强制收敛状态
+强制收敛期间且名额仍满 -> 额外节点重连立即拒绝，不重新获得观察期
+已有节点释放名额 -> 新连接可以恢复观察并正常取得名额
+```
+
+Redis 中保存的是带 TTL 的在线 IP 与正式活跃节点租约，不是永久名单。Xray TCP 入站（包括 VLESS + gRPC）和 Hysteria2 客户端连接会在存活期间按 `RefreshInterval` 续租；活跃节点在本节点最后一条连接断开后立即释放名额。
+
+fail-open 仍然优先保证节点可用性：Redis 故障期间可能暂时放进超限连接。Redis 恢复后，正式租约续租会重新比较限制数量，超出的最新 IP 或节点会被清退。参与排序的 V2bX 机器应保持 NTP/chrony 时间同步。
 
 ## 端口
 
@@ -274,7 +293,7 @@ systemctl start redis-server
 
 ## 配置 V2bX
 
-在节点配置的 `LimitConfig` 下添加：
+在所有参与限制的 Xray/Hysteria2 节点配置的 `LimitConfig` 下添加：
 
 ```json
 "LimitConfig": {
@@ -300,6 +319,13 @@ systemctl start redis-server
       "Db": 0,
       "TLS": false
     }
+  },
+  "ActiveNodeLimit": {
+    "Enable": true,
+    "Limit": 0,
+    "ActivationDelay": 60,
+    "BlockTTL": 600,
+    "KeyPrefix": "v2bx:active_node"
   }
 }
 ```
@@ -322,15 +348,27 @@ MasterName       Sentinel master 名称。
 Password         Redis master 密码。
 ```
 
+活跃节点字段说明：
+
+```text
+ActiveNodeLimit.Enable           是否启用长期活跃节点限制。
+ActiveNodeLimit.Limit            0 表示按每个用户的 device_limit；正数表示所有用户使用固定上限。
+ActiveNodeLimit.ActivationDelay  新节点观察时间，单位秒。建议 60，用于过滤普通测速。
+ActiveNodeLimit.BlockTTL         确认超限后的收敛/拒绝时间，单位秒。建议 600。
+ActiveNodeLimit.KeyPrefix        Redis key 前缀，默认 v2bx:active_node。
+```
+
+上例的 `ActiveNodeLimit` 会复用 `OnlineIPLimit` 的 `RedisConfig`、`Scope`、`TTL`、`RefreshInterval`、`RejectCacheTTL`、`Timeout` 和 `FailureCooldown`。若只开启活跃节点限制，则必须在 `ActiveNodeLimit` 中完整填写 Redis 参数。
+
 ### 例如：
 
-```bash
+```json
 {
-  "Core": "sing",
+  "Core": "xray",
   "ApiHost": "https://你的面板地址",
   "ApiKey": "xxx",
   "NodeID": 1,
-  "NodeType": "shadowsocks",
+  "NodeType": "vless",
   "Timeout": 30,
 
   "LimitConfig": {
@@ -356,6 +394,13 @@ Password         Redis master 密码。
         "Db": 0,
         "TLS": false
       }
+    },
+    "ActiveNodeLimit": {
+      "Enable": true,
+      "Limit": 0,
+      "ActivationDelay": 60,
+      "BlockTTL": 600,
+      "KeyPrefix": "v2bx:active_node"
     }
   }
 }
@@ -429,6 +474,16 @@ redis-cli -h "$MASTER_IP" -a '<REDIS_PASSWORD>' --scan --pattern 'v2bx:online_ip
 redis-cli -h "$MASTER_IP" -a '<REDIS_PASSWORD>' ZRANGE '<key>' 0 -1 WITHSCORES
 ```
 
+开启活跃节点限制后，用户在节点上持续连接超过 `ActivationDelay` 后查看正式节点租约：
+
+```bash
+redis-cli -h "$MASTER_IP" -a '<REDIS_PASSWORD>' --scan --pattern 'v2bx:active_node:*'
+redis-cli -h "$MASTER_IP" -a '<REDIS_PASSWORD>' ZRANGE '<active-node-key>' 0 -1 WITHSCORES
+redis-cli -h "$MASTER_IP" -a '<REDIS_PASSWORD>' ZRANGE '<active-node-key>:blocked' 0 -1 WITHSCORES
+```
+
+套餐限制为 3 时，3 个长期连接节点应出现在正式 key；第 4 个节点可以在观察期短暂使用，但持续超过观察期后会被清退。此后名额仍满时，它或其它额外新节点会立即被拒绝，不会每隔 60 秒重新连接再掉线。
+
 模拟 Redis 故障：
 
 ```bash
@@ -446,6 +501,7 @@ systemctl start redis-server
 
 ```text
 online ip redis unavailable, fail-open
+active node redis unavailable, fail-open
 ```
 
 此时已有连接和新连接都应该继续放行。测试完成后重新启动 Redis 和 Sentinel。
@@ -453,9 +509,11 @@ online ip redis unavailable, fail-open
 ## 安全检查清单
 
 - Redis 和 Sentinel 只监听 WireGuard IP 或本机地址。
+- 同一面板中需要参与限制的所有 Xray/Hysteria2 节点都配置相同的 `ActiveNodeLimit` 参数。
 - 公网防火墙禁止访问 `6379` 和 `26379`。
 - WireGuard 内网防火墙允许 V2bX 节点访问 Redis/Sentinel 的 `6379` 和 `26379`。
 - Redis 使用强密码或 ACL 用户。
 - WireGuard peer 尽量使用 `/32` `AllowedIPs`。
 - Redis 服务器优先选择稳定机器，不建议放在最繁忙、最容易被攻击的代理节点上。
+- 所有 V2bX 节点启用 NTP/chrony 时间同步，以稳定判断超限租约的先后次序。
 - 监控 Redis 延迟、Sentinel failover、V2bX fail-open 日志。

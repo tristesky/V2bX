@@ -210,10 +210,16 @@ func (d *DefaultDispatcher) getLink(ctx context.Context, network net.Network) (*
 		}
 		lm.AddLink(managedWriter, outboundLink.Reader)
 		if sessionInbound.Source.Network == net.Network_TCP {
-			managedWriter.onClose = limit.AcquireOnlineIPLease(user.Email, sourceIP, func() {
+			disconnect := func() {
 				common.Close(managedWriter)
 				common.Interrupt(outboundLink.Reader)
-			})
+			}
+			releaseOnlineIP := limit.AcquireOnlineIPLease(user.Email, sourceIP, disconnect)
+			releaseActiveNode := limit.AcquireActiveNodeLease(user.Email, disconnect)
+			managedWriter.onClose = func() {
+				releaseOnlineIP()
+				releaseActiveNode()
+			}
 		}
 		inboundLink.Writer = managedWriter
 		if w != nil {
@@ -410,10 +416,16 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			manager: lm,
 		}
 		if sessionInbound.Source.Network == net.Network_TCP {
-			managedWriter.onClose = limit.AcquireOnlineIPLease(user.Email, sourceIP, func() {
+			disconnect := func() {
 				common.Close(managedWriter)
 				common.Interrupt(outbound.Reader)
-			})
+			}
+			releaseOnlineIP := limit.AcquireOnlineIPLease(user.Email, sourceIP, disconnect)
+			releaseActiveNode := limit.AcquireActiveNodeLease(user.Email, disconnect)
+			managedWriter.onClose = func() {
+				releaseOnlineIP()
+				releaseActiveNode()
+			}
 		}
 		outbound.Writer = managedWriter
 		if w != nil {

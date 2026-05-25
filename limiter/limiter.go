@@ -22,18 +22,22 @@ func Init() {
 }
 
 type Limiter struct {
-	DomainRules    []*regexp.Regexp
-	ProtocolRules  []string
-	SpeedLimit     int
-	DeviceLimit    int
-	UserOnlineIP   *sync.Map      // Key: TagUUID, value: {Key: Ip, value: Uid}
-	OldUserOnline  *sync.Map      // Key: Ip, value: Uid
-	UUIDtoUID      map[string]int // Key: UUID, value: Uid
-	UserLimitInfo  *sync.Map      // Key: TagUUID value: UserLimitInfo
-	SpeedLimiter   *sync.Map      // key: TagUUID, value: *ratelimit.Bucket
-	AliveList      map[int]int    // Key: Uid, value: alive_ip
-	OnlineIPStore  onlineIPStore
-	onlineIPLeases *onlineIPLeaseTracker
+	DomainRules          []*regexp.Regexp
+	ProtocolRules        []string
+	SpeedLimit           int
+	DeviceLimit          int
+	UserOnlineIP         *sync.Map      // Key: TagUUID, value: {Key: Ip, value: Uid}
+	OldUserOnline        *sync.Map      // Key: Ip, value: Uid
+	UUIDtoUID            map[string]int // Key: UUID, value: Uid
+	UserLimitInfo        *sync.Map      // Key: TagUUID value: UserLimitInfo
+	SpeedLimiter         *sync.Map      // key: TagUUID, value: *ratelimit.Bucket
+	AliveList            map[int]int    // Key: Uid, value: alive_ip
+	OnlineIPStore        onlineIPStore
+	onlineIPLeases       *onlineIPLeaseTracker
+	ActiveNodeID         string
+	ActiveNodeFixedLimit int
+	ActiveNodeStore      activeNodeStore
+	activeNodeLeases     *activeNodeLeaseTracker
 }
 
 type UserLimitInfo struct {
@@ -51,6 +55,10 @@ func AddLimiter(tag string, l *conf.LimitConfig, users []panel.UserInfo, aliveLi
 	if len(defaultScopes) > 0 {
 		defaultScope = defaultScopes[0]
 	}
+	activeNodeID := tag
+	if len(defaultScopes) > 1 && defaultScopes[1] != "" {
+		activeNodeID = defaultScopes[1]
+	}
 	info := &Limiter{
 		SpeedLimit:    l.SpeedLimit,
 		DeviceLimit:   l.IPLimit,
@@ -59,6 +67,10 @@ func AddLimiter(tag string, l *conf.LimitConfig, users []panel.UserInfo, aliveLi
 		SpeedLimiter:  new(sync.Map),
 		AliveList:     aliveList,
 		OldUserOnline: new(sync.Map),
+		ActiveNodeID:  activeNodeID,
+	}
+	if l.ActiveNodeLimit != nil {
+		info.ActiveNodeFixedLimit = l.ActiveNodeLimit.Limit
 	}
 	uuidmap := make(map[string]int)
 	for i := range users {
@@ -83,6 +95,13 @@ func AddLimiter(tag string, l *conf.LimitConfig, users []panel.UserInfo, aliveLi
 	}
 	info.OnlineIPStore = store
 	info.onlineIPLeases = newOnlineIPLeaseTracker(store)
+	activeNodeStore, err := newActiveNodeStore(l.ActiveNodeLimit, l.OnlineIPLimit, defaultScope)
+	if err != nil {
+		log.WithField("tag", tag).WithError(err).Warn("init active node limiter failed, fail-open")
+		activeNodeStore = failOpenActiveNodeStore{}
+	}
+	info.ActiveNodeStore = activeNodeStore
+	info.activeNodeLeases = newActiveNodeLeaseTracker(activeNodeStore, activeNodeID)
 	limitLock.Lock()
 	limiter[tag] = info
 	limitLock.Unlock()
@@ -108,10 +127,18 @@ func DeleteLimiter(tag string) {
 		if info.onlineIPLeases != nil {
 			info.onlineIPLeases.Close()
 		}
+		if info.activeNodeLeases != nil {
+			info.activeNodeLeases.Close()
+		}
 	}
 	if info != nil && info.OnlineIPStore != nil {
 		if err := info.OnlineIPStore.Close(); err != nil {
 			log.WithField("tag", tag).WithError(err).Warn("close online ip limiter failed")
+		}
+	}
+	if info != nil && info.ActiveNodeStore != nil {
+		if err := info.ActiveNodeStore.Close(); err != nil {
+			log.WithField("tag", tag).WithError(err).Warn("close active node limiter failed")
 		}
 	}
 }
@@ -139,6 +166,12 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 		userLimit.OverLimit = false
 		l.UserLimitInfo.Store(format.UserTag(tag, added[i].Uuid), userLimit)
 		l.UUIDtoUID[added[i].Uuid] = added[i].Id
+		if l.activeNodeLeases != nil {
+			l.activeNodeLeases.UpdateLimit(
+				onlineIPIdentity{UID: added[i].Id, UUID: added[i].Uuid},
+				l.effectiveActiveNodeLimit(userLimit.DeviceLimit),
+			)
+		}
 	}
 }
 
@@ -162,10 +195,12 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool
 	userLimit := 0
 	deviceLimit := 0
 	var uid int
+	var uuid string
 	if v, ok := l.UserLimitInfo.Load(taguuid); ok {
 		u := v.(*UserLimitInfo)
 		deviceLimit = u.DeviceLimit
 		uid = u.UID
+		uuid = u.UUID
 		if deviceLimit == 0 {
 			deviceLimit = l.DeviceLimit
 		}
@@ -184,12 +219,14 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool
 		return nil, true
 	}
 	if noSSUDP {
+		identity := onlineIPIdentity{UID: uid, UUID: uuid}
+		activeNodeLimit := l.effectiveActiveNodeLimit(deviceLimit)
+		if l.ActiveNodeStore != nil && activeNodeLimit > 0 &&
+			l.ActiveNodeStore.Check(identity, l.ActiveNodeID, activeNodeLimit) == activeNodeRejected {
+			return nil, true
+		}
 		if l.OnlineIPStore != nil && deviceLimit > 0 {
-			uuid := ""
-			if v, ok := l.UserLimitInfo.Load(taguuid); ok {
-				uuid = v.(*UserLimitInfo).UUID
-			}
-			if !l.OnlineIPStore.Allow(onlineIPIdentity{UID: uid, UUID: uuid}, ip, deviceLimit) {
+			if !l.OnlineIPStore.Allow(identity, ip, deviceLimit) {
 				return nil, true
 			}
 			l.storeOnlineIP(taguuid, ip, uid)
@@ -240,6 +277,36 @@ func (l *Limiter) AcquireOnlineIPLease(taguuid string, ip string, disconnect fun
 	}
 
 	return l.onlineIPLeases.Acquire(onlineIPIdentity{UID: u.UID, UUID: u.UUID}, strings.TrimPrefix(ip, "::ffff:"), deviceLimit, disconnect)
+}
+
+func (l *Limiter) AcquireActiveNodeLease(taguuid string, disconnect func()) func() {
+	if l.activeNodeLeases == nil {
+		return noopActiveNodeLeaseRelease
+	}
+	v, ok := l.UserLimitInfo.Load(taguuid)
+	if !ok {
+		return noopActiveNodeLeaseRelease
+	}
+	u := v.(*UserLimitInfo)
+	deviceLimit := u.DeviceLimit
+	if deviceLimit == 0 {
+		deviceLimit = l.DeviceLimit
+	}
+	limit := l.effectiveActiveNodeLimit(deviceLimit)
+	if limit <= 0 {
+		return noopActiveNodeLeaseRelease
+	}
+	return l.activeNodeLeases.Acquire(onlineIPIdentity{UID: u.UID, UUID: u.UUID}, limit, disconnect)
+}
+
+func (l *Limiter) effectiveActiveNodeLimit(deviceLimit int) int {
+	if l.ActiveNodeFixedLimit > 0 {
+		return l.ActiveNodeFixedLimit
+	}
+	if deviceLimit == 0 {
+		return l.DeviceLimit
+	}
+	return deviceLimit
 }
 
 func (l *Limiter) checkLocalOnlineIPLimit(taguuid string, ip string, uid int, deviceLimit int) (reject bool) {
