@@ -22,22 +22,22 @@ func Init() {
 }
 
 type Limiter struct {
-	DomainRules          []*regexp.Regexp
-	ProtocolRules        []string
-	SpeedLimit           int
-	DeviceLimit          int
-	UserOnlineIP         *sync.Map      // Key: TagUUID, value: {Key: Ip, value: Uid}
-	OldUserOnline        *sync.Map      // Key: Ip, value: Uid
-	UUIDtoUID            map[string]int // Key: UUID, value: Uid
-	UserLimitInfo        *sync.Map      // Key: TagUUID value: UserLimitInfo
-	SpeedLimiter         *sync.Map      // key: TagUUID, value: *ratelimit.Bucket
-	AliveList            map[int]int    // Key: Uid, value: alive_ip
-	OnlineIPStore        onlineIPStore
-	onlineIPLeases       *onlineIPLeaseTracker
-	ActiveNodeID         string
-	ActiveNodeFixedLimit int
-	ActiveNodeStore      activeNodeStore
-	activeNodeLeases     *activeNodeLeaseTracker
+	DomainRules                []*regexp.Regexp
+	ProtocolRules              []string
+	SpeedLimit                 int
+	DeviceLimit                int
+	UserOnlineIP               *sync.Map      // Key: TagUUID, value: {Key: Ip, value: Uid}
+	OldUserOnline              *sync.Map      // Key: Ip, value: Uid
+	UUIDtoUID                  map[string]int // Key: UUID, value: Uid
+	UserLimitInfo              *sync.Map      // Key: TagUUID value: UserLimitInfo
+	SpeedLimiter               *sync.Map      // key: TagUUID, value: *ratelimit.Bucket
+	AliveList                  map[int]int    // Key: Uid, value: alive_ip
+	OnlineIPStore              onlineIPStore
+	onlineIPLeases             *onlineIPLeaseTracker
+	SameIPActiveNodeID         string
+	SameIPActiveNodeFixedLimit int
+	SameIPActiveNodeStore      activeNodeStore
+	sameIPActiveNodeLeases     *activeNodeLeaseTracker
 }
 
 type UserLimitInfo struct {
@@ -55,22 +55,26 @@ func AddLimiter(tag string, l *conf.LimitConfig, users []panel.UserInfo, aliveLi
 	if len(defaultScopes) > 0 {
 		defaultScope = defaultScopes[0]
 	}
-	activeNodeID := tag
+	sameIPActiveNodeID := tag
 	if len(defaultScopes) > 1 && defaultScopes[1] != "" {
-		activeNodeID = defaultScopes[1]
+		sameIPActiveNodeID = defaultScopes[1]
 	}
 	info := &Limiter{
-		SpeedLimit:    l.SpeedLimit,
-		DeviceLimit:   l.IPLimit,
-		UserOnlineIP:  new(sync.Map),
-		UserLimitInfo: new(sync.Map),
-		SpeedLimiter:  new(sync.Map),
-		AliveList:     aliveList,
-		OldUserOnline: new(sync.Map),
-		ActiveNodeID:  activeNodeID,
+		SpeedLimit:         l.SpeedLimit,
+		DeviceLimit:        l.IPLimit,
+		UserOnlineIP:       new(sync.Map),
+		UserLimitInfo:      new(sync.Map),
+		SpeedLimiter:       new(sync.Map),
+		AliveList:          aliveList,
+		OldUserOnline:      new(sync.Map),
+		SameIPActiveNodeID: sameIPActiveNodeID,
 	}
-	if l.ActiveNodeLimit != nil {
-		info.ActiveNodeFixedLimit = l.ActiveNodeLimit.Limit
+	sameIPActiveNodeConfig := l.SameIPActiveNodeLimit
+	if sameIPActiveNodeConfig == nil {
+		sameIPActiveNodeConfig = l.ActiveNodeLimit
+	}
+	if sameIPActiveNodeConfig != nil {
+		info.SameIPActiveNodeFixedLimit = sameIPActiveNodeConfig.Limit
 	}
 	uuidmap := make(map[string]int)
 	for i := range users {
@@ -95,13 +99,13 @@ func AddLimiter(tag string, l *conf.LimitConfig, users []panel.UserInfo, aliveLi
 	}
 	info.OnlineIPStore = store
 	info.onlineIPLeases = newOnlineIPLeaseTracker(store)
-	activeNodeStore, err := newActiveNodeStore(l.ActiveNodeLimit, l.OnlineIPLimit, defaultScope)
+	activeNodeStore, err := newActiveNodeStore(sameIPActiveNodeConfig, l.OnlineIPLimit, defaultScope)
 	if err != nil {
-		log.WithField("tag", tag).WithError(err).Warn("init active node limiter failed, fail-open")
+		log.WithField("tag", tag).WithError(err).Warn("init same-ip active node limiter failed, fail-open")
 		activeNodeStore = failOpenActiveNodeStore{}
 	}
-	info.ActiveNodeStore = activeNodeStore
-	info.activeNodeLeases = newActiveNodeLeaseTracker(activeNodeStore, activeNodeID)
+	info.SameIPActiveNodeStore = activeNodeStore
+	info.sameIPActiveNodeLeases = newActiveNodeLeaseTracker(activeNodeStore, sameIPActiveNodeID)
 	limitLock.Lock()
 	limiter[tag] = info
 	limitLock.Unlock()
@@ -127,8 +131,8 @@ func DeleteLimiter(tag string) {
 		if info.onlineIPLeases != nil {
 			info.onlineIPLeases.Close()
 		}
-		if info.activeNodeLeases != nil {
-			info.activeNodeLeases.Close()
+		if info.sameIPActiveNodeLeases != nil {
+			info.sameIPActiveNodeLeases.Close()
 		}
 	}
 	if info != nil && info.OnlineIPStore != nil {
@@ -136,9 +140,9 @@ func DeleteLimiter(tag string) {
 			log.WithField("tag", tag).WithError(err).Warn("close online ip limiter failed")
 		}
 	}
-	if info != nil && info.ActiveNodeStore != nil {
-		if err := info.ActiveNodeStore.Close(); err != nil {
-			log.WithField("tag", tag).WithError(err).Warn("close active node limiter failed")
+	if info != nil && info.SameIPActiveNodeStore != nil {
+		if err := info.SameIPActiveNodeStore.Close(); err != nil {
+			log.WithField("tag", tag).WithError(err).Warn("close same-ip active node limiter failed")
 		}
 	}
 }
@@ -166,10 +170,10 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 		userLimit.OverLimit = false
 		l.UserLimitInfo.Store(format.UserTag(tag, added[i].Uuid), userLimit)
 		l.UUIDtoUID[added[i].Uuid] = added[i].Id
-		if l.activeNodeLeases != nil {
-			l.activeNodeLeases.UpdateLimit(
+		if l.sameIPActiveNodeLeases != nil {
+			l.sameIPActiveNodeLeases.UpdateLimit(
 				onlineIPIdentity{UID: added[i].Id, UUID: added[i].Uuid},
-				l.effectiveActiveNodeLimit(userLimit.DeviceLimit),
+				l.effectiveSameIPActiveNodeLimit(userLimit.DeviceLimit),
 			)
 		}
 	}
@@ -220,9 +224,9 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool
 	}
 	if noSSUDP {
 		identity := onlineIPIdentity{UID: uid, UUID: uuid}
-		activeNodeLimit := l.effectiveActiveNodeLimit(deviceLimit)
-		if l.ActiveNodeStore != nil && activeNodeLimit > 0 &&
-			l.ActiveNodeStore.Check(identity, l.ActiveNodeID, activeNodeLimit) == activeNodeRejected {
+		activeNodeLimit := l.effectiveSameIPActiveNodeLimit(deviceLimit)
+		if l.SameIPActiveNodeStore != nil && activeNodeLimit > 0 &&
+			l.SameIPActiveNodeStore.Check(identity, ip, l.SameIPActiveNodeID, activeNodeLimit) == activeNodeRejected {
 			return nil, true
 		}
 		if l.OnlineIPStore != nil && deviceLimit > 0 {
@@ -279,8 +283,8 @@ func (l *Limiter) AcquireOnlineIPLease(taguuid string, ip string, disconnect fun
 	return l.onlineIPLeases.Acquire(onlineIPIdentity{UID: u.UID, UUID: u.UUID}, strings.TrimPrefix(ip, "::ffff:"), deviceLimit, disconnect)
 }
 
-func (l *Limiter) AcquireActiveNodeLease(taguuid string, disconnect func()) func() {
-	if l.activeNodeLeases == nil {
+func (l *Limiter) AcquireSameIPActiveNodeLease(taguuid string, ip string, disconnect func()) func() {
+	if l.sameIPActiveNodeLeases == nil {
 		return noopActiveNodeLeaseRelease
 	}
 	v, ok := l.UserLimitInfo.Load(taguuid)
@@ -292,16 +296,16 @@ func (l *Limiter) AcquireActiveNodeLease(taguuid string, disconnect func()) func
 	if deviceLimit == 0 {
 		deviceLimit = l.DeviceLimit
 	}
-	limit := l.effectiveActiveNodeLimit(deviceLimit)
+	limit := l.effectiveSameIPActiveNodeLimit(deviceLimit)
 	if limit <= 0 {
 		return noopActiveNodeLeaseRelease
 	}
-	return l.activeNodeLeases.Acquire(onlineIPIdentity{UID: u.UID, UUID: u.UUID}, limit, disconnect)
+	return l.sameIPActiveNodeLeases.Acquire(onlineIPIdentity{UID: u.UID, UUID: u.UUID}, strings.TrimPrefix(ip, "::ffff:"), limit, disconnect)
 }
 
-func (l *Limiter) effectiveActiveNodeLimit(deviceLimit int) int {
-	if l.ActiveNodeFixedLimit > 0 {
-		return l.ActiveNodeFixedLimit
+func (l *Limiter) effectiveSameIPActiveNodeLimit(deviceLimit int) int {
+	if l.SameIPActiveNodeFixedLimit > 0 {
+		return l.SameIPActiveNodeFixedLimit
 	}
 	if deviceLimit == 0 {
 		return l.DeviceLimit

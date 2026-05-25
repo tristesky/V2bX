@@ -10,6 +10,7 @@ var noopActiveNodeLeaseRelease = func() {}
 
 type activeNodeLease struct {
 	identity            onlineIPIdentity
+	ip                  string
 	nodeID              string
 	limit               int
 	observedAt          time.Time
@@ -44,7 +45,7 @@ func newActiveNodeLeaseTracker(store activeNodeStore, nodeID string) *activeNode
 	return tracker
 }
 
-func (t *activeNodeLeaseTracker) Acquire(identity onlineIPIdentity, limit int, disconnect func()) func() {
+func (t *activeNodeLeaseTracker) Acquire(identity onlineIPIdentity, ip string, limit int, disconnect func()) func() {
 	if t == nil || limit <= 0 {
 		return noopActiveNodeLeaseRelease
 	}
@@ -52,7 +53,8 @@ func (t *activeNodeLeaseTracker) Acquire(identity onlineIPIdentity, limit int, d
 		disconnect = noopActiveNodeLeaseRelease
 	}
 
-	key := activeNodeLeaseMapKey(identity, t.nodeID)
+	ip = t.store.NormalizeIP(ip)
+	key := activeNodeLeaseMapKey(identity, ip, t.nodeID)
 	t.mu.Lock()
 	if t.stopped {
 		t.mu.Unlock()
@@ -68,13 +70,13 @@ func (t *activeNodeLeaseTracker) Acquire(identity onlineIPIdentity, limit int, d
 	}
 	t.mu.Unlock()
 
-	decision := t.store.Check(identity, t.nodeID, limit)
+	decision := t.store.Check(identity, ip, t.nodeID, limit)
 	if decision == activeNodeRejected {
 		disconnect()
 		return noopActiveNodeLeaseRelease
 	}
 	admittedAtUnixMicro := time.Now().UnixMicro()
-	if decision == activeNodeAdmitted && !t.store.Renew(identity, t.nodeID, limit, admittedAtUnixMicro) {
+	if decision == activeNodeAdmitted && !t.store.Renew(identity, ip, t.nodeID, limit, admittedAtUnixMicro) {
 		disconnect()
 		return noopActiveNodeLeaseRelease
 	}
@@ -83,7 +85,7 @@ func (t *activeNodeLeaseTracker) Acquire(identity onlineIPIdentity, limit int, d
 	if t.stopped {
 		t.mu.Unlock()
 		if decision == activeNodeAdmitted {
-			t.store.Release(identity, t.nodeID)
+			t.store.Release(identity, ip, t.nodeID)
 		}
 		return noopActiveNodeLeaseRelease
 	}
@@ -92,6 +94,7 @@ func (t *activeNodeLeaseTracker) Acquire(identity onlineIPIdentity, limit int, d
 		now := time.Now()
 		lease = &activeNodeLease{
 			identity:            identity,
+			ip:                  ip,
 			nodeID:              t.nodeID,
 			limit:               limit,
 			observedAt:          now,
@@ -137,7 +140,7 @@ func (t *activeNodeLeaseTracker) release(key string, callbackID uint64) {
 	delete(t.leases, key)
 	t.mu.Unlock()
 	if lease.admitted {
-		t.store.Release(lease.identity, lease.nodeID)
+		t.store.Release(lease.identity, lease.ip, lease.nodeID)
 	}
 }
 
@@ -145,22 +148,24 @@ func (t *activeNodeLeaseTracker) UpdateLimit(identity onlineIPIdentity, limit in
 	if t == nil {
 		return
 	}
-	key := activeNodeLeaseMapKey(identity, t.nodeID)
 	t.mu.Lock()
-	lease, ok := t.leases[key]
-	if !ok {
-		t.mu.Unlock()
-		return
+	var removed []activeNodeLease
+	for key, lease := range t.leases {
+		if lease.identity != identity {
+			continue
+		}
+		if limit > 0 {
+			lease.limit = limit
+			continue
+		}
+		delete(t.leases, key)
+		if lease.admitted {
+			removed = append(removed, *lease)
+		}
 	}
-	if limit > 0 {
-		lease.limit = limit
-		t.mu.Unlock()
-		return
-	}
-	delete(t.leases, key)
 	t.mu.Unlock()
-	if lease.admitted {
-		t.store.Release(lease.identity, lease.nodeID)
+	for _, lease := range removed {
+		t.store.Release(lease.identity, lease.ip, lease.nodeID)
 	}
 }
 
@@ -191,19 +196,19 @@ func (t *activeNodeLeaseTracker) process(now time.Time) {
 	leases := t.snapshot()
 	for _, lease := range leases {
 		if lease.admitted {
-			if !t.store.Renew(lease.identity, lease.nodeID, lease.limit, lease.admittedAtUnixMicro) {
-				t.disconnect(activeNodeLeaseMapKey(lease.identity, lease.nodeID))
+			if !t.store.Renew(lease.identity, lease.ip, lease.nodeID, lease.limit, lease.admittedAtUnixMicro) {
+				t.disconnect(activeNodeLeaseMapKey(lease.identity, lease.ip, lease.nodeID))
 			}
 			continue
 		}
 		if now.Sub(lease.observedAt) < t.store.ActivationDelay() {
 			continue
 		}
-		switch t.store.Activate(lease.identity, lease.nodeID, lease.limit, lease.admittedAtUnixMicro) {
+		switch t.store.Activate(lease.identity, lease.ip, lease.nodeID, lease.limit, lease.admittedAtUnixMicro) {
 		case activeNodeAdmitted:
-			t.markAdmitted(activeNodeLeaseMapKey(lease.identity, lease.nodeID), lease.identity, lease.nodeID)
+			t.markAdmitted(activeNodeLeaseMapKey(lease.identity, lease.ip, lease.nodeID), lease.identity, lease.ip, lease.nodeID)
 		case activeNodeRejected:
-			t.disconnect(activeNodeLeaseMapKey(lease.identity, lease.nodeID))
+			t.disconnect(activeNodeLeaseMapKey(lease.identity, lease.ip, lease.nodeID))
 		}
 	}
 }
@@ -215,6 +220,7 @@ func (t *activeNodeLeaseTracker) snapshot() []activeNodeLease {
 	for _, lease := range t.leases {
 		leases = append(leases, activeNodeLease{
 			identity:            lease.identity,
+			ip:                  lease.ip,
 			nodeID:              lease.nodeID,
 			limit:               lease.limit,
 			observedAt:          lease.observedAt,
@@ -225,7 +231,7 @@ func (t *activeNodeLeaseTracker) snapshot() []activeNodeLease {
 	return leases
 }
 
-func (t *activeNodeLeaseTracker) markAdmitted(key string, identity onlineIPIdentity, nodeID string) {
+func (t *activeNodeLeaseTracker) markAdmitted(key string, identity onlineIPIdentity, ip string, nodeID string) {
 	t.mu.Lock()
 	lease, ok := t.leases[key]
 	if ok && len(lease.callbacks) > 0 {
@@ -234,7 +240,7 @@ func (t *activeNodeLeaseTracker) markAdmitted(key string, identity onlineIPIdent
 		return
 	}
 	t.mu.Unlock()
-	t.store.Release(identity, nodeID)
+	t.store.Release(identity, ip, nodeID)
 }
 
 func (t *activeNodeLeaseTracker) disconnect(key string) {
@@ -263,13 +269,23 @@ func (t *activeNodeLeaseTracker) Close() {
 	}
 	t.stopped = true
 	close(t.stop)
+	var admitted []activeNodeLease
+	for _, lease := range t.leases {
+		if lease.admitted {
+			admitted = append(admitted, *lease)
+		}
+	}
+	t.leases = make(map[string]*activeNodeLease)
 	t.mu.Unlock()
 	<-t.done
+	for _, lease := range admitted {
+		t.store.Release(lease.identity, lease.ip, lease.nodeID)
+	}
 }
 
-func activeNodeLeaseMapKey(identity onlineIPIdentity, nodeID string) string {
+func activeNodeLeaseMapKey(identity onlineIPIdentity, ip string, nodeID string) string {
 	if identity.UID != 0 {
-		return strconv.Itoa(identity.UID) + "|" + nodeID
+		return strconv.Itoa(identity.UID) + "|" + ip + "|" + nodeID
 	}
-	return identity.UUID + "|" + nodeID
+	return identity.UUID + "|" + ip + "|" + nodeID
 }

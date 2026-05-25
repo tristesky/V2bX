@@ -68,7 +68,7 @@ func (l *serverLogger) Connect(addr net.Addr, uuid string, tx uint64) {
 			l.packetBlocker.Block(addr)
 		}
 		releaseOnlineIP := limiterinfo.AcquireOnlineIPLease(taguuid, ip, disconnect)
-		releaseActiveNode := limiterinfo.AcquireActiveNodeLease(taguuid, disconnect)
+		releaseActiveNode := limiterinfo.AcquireSameIPActiveNodeLease(taguuid, ip, disconnect)
 		l.storeOnlineIPLease(addr, uuid, func() {
 			releaseOnlineIP()
 			releaseActiveNode()

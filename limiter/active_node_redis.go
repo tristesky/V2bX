@@ -16,7 +16,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-const defaultActiveNodeKeyPrefix = "v2bx:active_node"
+const defaultActiveNodeKeyPrefix = "v2bx:same_ip_active_node"
 
 type activeNodeDecision uint8
 
@@ -177,10 +177,11 @@ return 1
 `)
 
 type activeNodeStore interface {
-	Check(identity onlineIPIdentity, nodeID string, limit int) activeNodeDecision
-	Activate(identity onlineIPIdentity, nodeID string, limit int, admittedAtUnixMicro int64) activeNodeDecision
-	Renew(identity onlineIPIdentity, nodeID string, limit int, admittedAtUnixMicro int64) bool
-	Release(identity onlineIPIdentity, nodeID string)
+	NormalizeIP(ip string) string
+	Check(identity onlineIPIdentity, ip string, nodeID string, limit int) activeNodeDecision
+	Activate(identity onlineIPIdentity, ip string, nodeID string, limit int, admittedAtUnixMicro int64) activeNodeDecision
+	Renew(identity onlineIPIdentity, ip string, nodeID string, limit int, admittedAtUnixMicro int64) bool
+	Release(identity onlineIPIdentity, ip string, nodeID string)
 	ActivationDelay() time.Duration
 	RenewInterval() time.Duration
 	Close() error
@@ -190,19 +191,23 @@ type failOpenActiveNodeStore struct {
 	activationDelay time.Duration
 }
 
-func (s failOpenActiveNodeStore) Check(identity onlineIPIdentity, nodeID string, limit int) activeNodeDecision {
+func (s failOpenActiveNodeStore) NormalizeIP(ip string) string {
+	return normalizeOnlineIP(ip, 128)
+}
+
+func (s failOpenActiveNodeStore) Check(identity onlineIPIdentity, ip string, nodeID string, limit int) activeNodeDecision {
 	return activeNodeObserve
 }
 
-func (s failOpenActiveNodeStore) Activate(identity onlineIPIdentity, nodeID string, limit int, admittedAtUnixMicro int64) activeNodeDecision {
+func (s failOpenActiveNodeStore) Activate(identity onlineIPIdentity, ip string, nodeID string, limit int, admittedAtUnixMicro int64) activeNodeDecision {
 	return activeNodeObserve
 }
 
-func (s failOpenActiveNodeStore) Renew(identity onlineIPIdentity, nodeID string, limit int, admittedAtUnixMicro int64) bool {
+func (s failOpenActiveNodeStore) Renew(identity onlineIPIdentity, ip string, nodeID string, limit int, admittedAtUnixMicro int64) bool {
 	return true
 }
 
-func (s failOpenActiveNodeStore) Release(identity onlineIPIdentity, nodeID string) {}
+func (s failOpenActiveNodeStore) Release(identity onlineIPIdentity, ip string, nodeID string) {}
 
 func (s failOpenActiveNodeStore) ActivationDelay() time.Duration {
 	return s.activationDelay
@@ -233,12 +238,13 @@ type redisActiveNodeStore struct {
 	rejectCacheTTL  time.Duration
 	timeout         time.Duration
 	failureCooldown time.Duration
+	ipv6Prefix      int
 	cache           sync.Map
 	failUntil       atomic.Int64
 	lastFailLog     atomic.Int64
 }
 
-func newActiveNodeStore(c *conf.ActiveNodeLimitConfig, fallback *conf.OnlineIPLimitConfig, defaultScope string) (activeNodeStore, error) {
+func newActiveNodeStore(c *conf.SameIPActiveNodeLimitConfig, fallback *conf.OnlineIPLimitConfig, defaultScope string) (activeNodeStore, error) {
 	if c == nil || !c.Enable {
 		return nil, nil
 	}
@@ -266,21 +272,24 @@ func newActiveNodeStore(c *conf.ActiveNodeLimitConfig, fallback *conf.OnlineIPLi
 		if resolved.FailureCooldown == 0 {
 			resolved.FailureCooldown = fallback.FailureCooldown
 		}
+		if resolved.IPv6Prefix == 0 {
+			resolved.IPv6Prefix = fallback.IPv6Prefix
+		}
 		if resolved.RedisConfig == nil {
 			resolved.RedisConfig = fallback.RedisConfig
 		}
 	}
 
 	if resolved.Type != "" && !strings.EqualFold(resolved.Type, "redis") {
-		return nil, fmt.Errorf("unsupported active node limit type: %s", resolved.Type)
+		return nil, fmt.Errorf("unsupported same-ip active node limit type: %s", resolved.Type)
 	}
 	if resolved.RedisConfig == nil {
-		return nil, errors.New("active node redis config is empty")
+		return nil, errors.New("same-ip active node redis config is empty")
 	}
 	return newRedisActiveNodeStore(&resolved, defaultScope)
 }
 
-func newRedisActiveNodeStore(c *conf.ActiveNodeLimitConfig, defaultScope string) (*redisActiveNodeStore, error) {
+func newRedisActiveNodeStore(c *conf.SameIPActiveNodeLimitConfig, defaultScope string) (*redisActiveNodeStore, error) {
 	rc := c.RedisConfig
 	addrs := make([]string, 0, len(rc.Addresses)+1)
 	if rc.Address != "" {
@@ -288,7 +297,7 @@ func newRedisActiveNodeStore(c *conf.ActiveNodeLimitConfig, defaultScope string)
 	}
 	addrs = append(addrs, rc.Addresses...)
 	if len(addrs) == 0 {
-		return nil, errors.New("active node redis address is empty")
+		return nil, errors.New("same-ip active node redis address is empty")
 	}
 
 	timeout := durationWithDefaultMS(c.Timeout, 200)
@@ -331,6 +340,10 @@ func newRedisActiveNodeStore(c *conf.ActiveNodeLimitConfig, defaultScope string)
 	if keyPrefix == "" {
 		keyPrefix = defaultActiveNodeKeyPrefix
 	}
+	ipv6Prefix := c.IPv6Prefix
+	if ipv6Prefix <= 0 || ipv6Prefix > 128 {
+		ipv6Prefix = 128
+	}
 
 	return &redisActiveNodeStore{
 		client:          client,
@@ -344,23 +357,28 @@ func newRedisActiveNodeStore(c *conf.ActiveNodeLimitConfig, defaultScope string)
 		rejectCacheTTL:  durationWithDefaultSeconds(c.RejectCacheTTL, 3),
 		timeout:         timeout,
 		failureCooldown: durationWithDefaultSeconds(c.FailureCooldown, 30),
+		ipv6Prefix:      ipv6Prefix,
 	}, nil
 }
 
-func (s *redisActiveNodeStore) Check(identity onlineIPIdentity, nodeID string, limit int) activeNodeDecision {
+func (s *redisActiveNodeStore) NormalizeIP(ip string) string {
+	return normalizeOnlineIP(ip, s.ipv6Prefix)
+}
+
+func (s *redisActiveNodeStore) Check(identity onlineIPIdentity, ip string, nodeID string, limit int) activeNodeDecision {
 	if limit <= 0 || nodeID == "" {
 		return activeNodeObserve
 	}
 	if time.Now().UnixNano() < s.failUntil.Load() {
 		return activeNodeObserve
 	}
-	key := s.redisKey(identity)
+	key := s.redisKey(identity, ip)
 	cacheKey := s.cacheKey(key, nodeID, limit)
 	if decision, ok := s.cacheGet(cacheKey); ok {
 		return decision
 	}
 
-	result, err := s.runDecisionScript(redisActiveNodeCheckScript, identity, nodeID, limit, time.Now().UnixMicro())
+	result, err := s.runDecisionScript(redisActiveNodeCheckScript, identity, ip, nodeID, limit, time.Now().UnixMicro())
 	if err != nil {
 		s.markFailure(err)
 		return activeNodeObserve
@@ -369,7 +387,7 @@ func (s *redisActiveNodeStore) Check(identity onlineIPIdentity, nodeID string, l
 	return result
 }
 
-func (s *redisActiveNodeStore) Activate(identity onlineIPIdentity, nodeID string, limit int, admittedAtUnixMicro int64) activeNodeDecision {
+func (s *redisActiveNodeStore) Activate(identity onlineIPIdentity, ip string, nodeID string, limit int, admittedAtUnixMicro int64) activeNodeDecision {
 	if limit <= 0 || nodeID == "" {
 		return activeNodeObserve
 	}
@@ -377,45 +395,45 @@ func (s *redisActiveNodeStore) Activate(identity onlineIPIdentity, nodeID string
 		return activeNodeObserve
 	}
 
-	result, err := s.runDecisionScript(redisActiveNodeActivateScript, identity, nodeID, limit, admittedAtUnixMicro)
+	result, err := s.runDecisionScript(redisActiveNodeActivateScript, identity, ip, nodeID, limit, admittedAtUnixMicro)
 	if err != nil {
 		s.markFailure(err)
 		return activeNodeObserve
 	}
-	s.cacheDecision(s.cacheKey(s.redisKey(identity), nodeID, limit), result)
+	s.cacheDecision(s.cacheKey(s.redisKey(identity, ip), nodeID, limit), result)
 	return result
 }
 
-func (s *redisActiveNodeStore) Renew(identity onlineIPIdentity, nodeID string, limit int, admittedAtUnixMicro int64) bool {
+func (s *redisActiveNodeStore) Renew(identity onlineIPIdentity, ip string, nodeID string, limit int, admittedAtUnixMicro int64) bool {
 	if time.Now().UnixNano() < s.failUntil.Load() {
 		return true
 	}
-	result, err := s.runDecisionScript(redisActiveNodeRenewScript, identity, nodeID, limit, admittedAtUnixMicro)
+	result, err := s.runDecisionScript(redisActiveNodeRenewScript, identity, ip, nodeID, limit, admittedAtUnixMicro)
 	if err != nil {
 		s.markFailure(err)
 		return true
 	}
-	s.cacheDecision(s.cacheKey(s.redisKey(identity), nodeID, limit), result)
+	s.cacheDecision(s.cacheKey(s.redisKey(identity, ip), nodeID, limit), result)
 	return result != activeNodeRejected
 }
 
-func (s *redisActiveNodeStore) Release(identity onlineIPIdentity, nodeID string) {
+func (s *redisActiveNodeStore) Release(identity onlineIPIdentity, ip string, nodeID string) {
 	if nodeID == "" || time.Now().UnixNano() < s.failUntil.Load() {
 		return
 	}
-	key := s.redisKey(identity)
+	key := s.redisKey(identity, ip)
 	s.deleteCachedNodeDecisions(key, nodeID)
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
 	defer cancel()
-	if _, err := redisActiveNodeReleaseScript.Run(ctx, s.client, []string{key, s.orderKey(identity)}, nodeID).Result(); err != nil {
+	if _, err := redisActiveNodeReleaseScript.Run(ctx, s.client, []string{key, s.orderKey(identity, ip)}, nodeID).Result(); err != nil {
 		s.markFailure(err)
 	}
 }
 
-func (s *redisActiveNodeStore) runDecisionScript(script *redis.Script, identity onlineIPIdentity, nodeID string, limit int, admittedAtUnixMicro int64) (activeNodeDecision, error) {
+func (s *redisActiveNodeStore) runDecisionScript(script *redis.Script, identity onlineIPIdentity, ip string, nodeID string, limit int, admittedAtUnixMicro int64) (activeNodeDecision, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
 	defer cancel()
-	result, err := script.Run(ctx, s.client, []string{s.redisKey(identity), s.orderKey(identity), s.blockedKey(identity), s.enforcedKey(identity)},
+	result, err := script.Run(ctx, s.client, []string{s.redisKey(identity, ip), s.orderKey(identity, ip), s.blockedKey(identity, ip), s.enforcedKey(identity, ip)},
 		time.Now().UnixMilli(),
 		admittedAtUnixMicro,
 		s.ttl.Milliseconds(),
@@ -445,24 +463,24 @@ func (s *redisActiveNodeStore) Close() error {
 	return s.client.Close()
 }
 
-func (s *redisActiveNodeStore) redisKey(identity onlineIPIdentity) string {
+func (s *redisActiveNodeStore) redisKey(identity onlineIPIdentity, ip string) string {
 	userKey := strconv.Itoa(identity.UID)
 	if identity.UID == 0 {
 		userKey = shortHash(identity.UUID)
 	}
-	return s.keyPrefix + ":" + s.scopeHash + ":" + userKey
+	return s.keyPrefix + ":" + s.scopeHash + ":" + userKey + ":" + shortHash(s.NormalizeIP(ip))
 }
 
-func (s *redisActiveNodeStore) orderKey(identity onlineIPIdentity) string {
-	return s.redisKey(identity) + ":order"
+func (s *redisActiveNodeStore) orderKey(identity onlineIPIdentity, ip string) string {
+	return s.redisKey(identity, ip) + ":order"
 }
 
-func (s *redisActiveNodeStore) blockedKey(identity onlineIPIdentity) string {
-	return s.redisKey(identity) + ":blocked"
+func (s *redisActiveNodeStore) blockedKey(identity onlineIPIdentity, ip string) string {
+	return s.redisKey(identity, ip) + ":blocked"
 }
 
-func (s *redisActiveNodeStore) enforcedKey(identity onlineIPIdentity) string {
-	return s.redisKey(identity) + ":enforced"
+func (s *redisActiveNodeStore) enforcedKey(identity onlineIPIdentity, ip string) string {
+	return s.redisKey(identity, ip) + ":enforced"
 }
 
 func (s *redisActiveNodeStore) cacheKey(key, nodeID string, limit int) string {
@@ -509,7 +527,7 @@ func (s *redisActiveNodeStore) markFailure(err error) {
 	nowNS := now.UnixNano()
 	last := s.lastFailLog.Load()
 	if nowNS-last >= s.failureCooldown.Nanoseconds() && s.lastFailLog.CompareAndSwap(last, nowNS) {
-		log.WithError(err).Warn("active node redis unavailable, fail-open")
+		log.WithError(err).Warn("same-ip active node redis unavailable, fail-open")
 	}
 }
 

@@ -60,10 +60,10 @@ GOEXPERIMENT=jsonv2 go build -v -o build_assets/V2bX -tags "sing xray hysteria2 
 
 [详细使用教程](https://v2bx.v-50.me/)
 
-### Redis 分布式在线 IP 与活跃节点限制
+### Redis 分布式在线 IP 与同 IP 活跃节点限制
 
 `LimitConfig.OnlineIPLimit` 可以开启基于 Redis 的跨节点在线 IP 限制。不配置或 `Enable` 为 `false` 时保持原有本地限制逻辑。
-`LimitConfig.ActiveNodeLimit` 可以进一步限制同一用户长期同时使用的节点数量：短时间测速连接不会正式占位，持续超限的节点会被清退并进入冷却拒绝状态。
+`LimitConfig.SameIPActiveNodeLimit` 可以进一步限制同一用户从同一个来源 IP 长期同时使用的节点数量：短时间测速连接不会正式占位，持续超限的节点会被清退并进入冷却拒绝状态。
 
 推荐使用 Redis 主从 + Sentinel，并让各 V2bX 节点通过 WireGuard/VPN 内网地址连接 Sentinel：
 
@@ -90,17 +90,17 @@ GOEXPERIMENT=jsonv2 go build -v -o build_assets/V2bX -tags "sing xray hysteria2 
       "Db": 0
     }
   },
-  "ActiveNodeLimit": {
+  "SameIPActiveNodeLimit": {
     "Enable": true,
     "Limit": 0,
     "ActivationDelay": 60,
     "BlockTTL": 600,
-    "KeyPrefix": "v2bx:active_node"
+    "KeyPrefix": "v2bx:same_ip_active_node"
   }
 }
 ```
 
-`ActiveNodeLimit.Limit` 为 `0` 时自动使用面板给每个用户下发的 `device_limit`，无需按套餐在节点手工配置数字。Redis/Sentinel 不可用时两种分布式限制都 fail-open，避免 Redis 故障导致全站不可用。`ActiveNodeLimit` 未填写 Redis 参数时会继承 `OnlineIPLimit` 的连接和超时配置，但使用独立 Redis key。
+`SameIPActiveNodeLimit.Limit` 为 `0` 时自动使用面板给每个用户下发的 `device_limit`，无需按套餐在节点手工配置数字。它按 `用户 + 来源 IP` 分组，不会把用户不同 IP 的正常节点切换合并统计。Redis/Sentinel 不可用时两种分布式限制都 fail-open，避免 Redis 故障导致全站不可用。该配置未填写 Redis 参数时会继承 `OnlineIPLimit` 的连接和超时配置，但使用独立 Redis key。旧字段名 `ActiveNodeLimit` 仍可兼容读取，建议迁移为新名称。
 
 完整部署步骤见 [Redis 分布式在线 IP 限制部署文档](docs/redis-online-ip.md)。
 

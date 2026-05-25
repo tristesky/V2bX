@@ -1,16 +1,17 @@
 package conf
 
 type LimitConfig struct {
-	EnableRealtime          bool                     `json:"EnableRealtime"`
-	SpeedLimit              int                      `json:"SpeedLimit"`
-	IPLimit                 int                      `json:"DeviceLimit"`
-	ConnLimit               int                      `json:"ConnLimit"`
-	EnableIpRecorder        bool                     `json:"EnableIpRecorder"`
-	IpRecorderConfig        *IpReportConfig          `json:"IpRecorderConfig"`
-	OnlineIPLimit           *OnlineIPLimitConfig     `json:"OnlineIPLimit"`
-	ActiveNodeLimit         *ActiveNodeLimitConfig   `json:"ActiveNodeLimit"`
-	EnableDynamicSpeedLimit bool                     `json:"EnableDynamicSpeedLimit"`
-	DynamicSpeedLimitConfig *DynamicSpeedLimitConfig `json:"DynamicSpeedLimitConfig"`
+	EnableRealtime          bool                         `json:"EnableRealtime"`
+	SpeedLimit              int                          `json:"SpeedLimit"`
+	IPLimit                 int                          `json:"DeviceLimit"`
+	ConnLimit               int                          `json:"ConnLimit"`
+	EnableIpRecorder        bool                         `json:"EnableIpRecorder"`
+	IpRecorderConfig        *IpReportConfig              `json:"IpRecorderConfig"`
+	OnlineIPLimit           *OnlineIPLimitConfig         `json:"OnlineIPLimit"`
+	SameIPActiveNodeLimit   *SameIPActiveNodeLimitConfig `json:"SameIPActiveNodeLimit"`
+	ActiveNodeLimit         *SameIPActiveNodeLimitConfig `json:"ActiveNodeLimit"` // Deprecated alias.
+	EnableDynamicSpeedLimit bool                         `json:"EnableDynamicSpeedLimit"`
+	DynamicSpeedLimitConfig *DynamicSpeedLimitConfig     `json:"DynamicSpeedLimitConfig"`
 }
 
 type RecorderConfig struct {
@@ -63,7 +64,7 @@ type OnlineIPLimitConfig struct {
 	RedisConfig     *RedisConfig `json:"RedisConfig"`
 }
 
-type ActiveNodeLimitConfig struct {
+type SameIPActiveNodeLimitConfig struct {
 	Enable          bool         `json:"Enable"`
 	Type            string       `json:"Type"`
 	Limit           int          `json:"Limit"`
@@ -76,5 +77,6 @@ type ActiveNodeLimitConfig struct {
 	RejectCacheTTL  int          `json:"RejectCacheTTL"`
 	Timeout         int          `json:"Timeout"`
 	FailureCooldown int          `json:"FailureCooldown"`
+	IPv6Prefix      int          `json:"IPv6Prefix"`
 	RedisConfig     *RedisConfig `json:"RedisConfig"`
 }

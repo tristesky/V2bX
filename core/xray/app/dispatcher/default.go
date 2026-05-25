@@ -215,7 +215,7 @@ func (d *DefaultDispatcher) getLink(ctx context.Context, network net.Network) (*
 				common.Interrupt(outboundLink.Reader)
 			}
 			releaseOnlineIP := limit.AcquireOnlineIPLease(user.Email, sourceIP, disconnect)
-			releaseActiveNode := limit.AcquireActiveNodeLease(user.Email, disconnect)
+			releaseActiveNode := limit.AcquireSameIPActiveNodeLease(user.Email, sourceIP, disconnect)
 			managedWriter.onClose = func() {
 				releaseOnlineIP()
 				releaseActiveNode()
@@ -421,7 +421,7 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 				common.Interrupt(outbound.Reader)
 			}
 			releaseOnlineIP := limit.AcquireOnlineIPLease(user.Email, sourceIP, disconnect)
-			releaseActiveNode := limit.AcquireActiveNodeLease(user.Email, disconnect)
+			releaseActiveNode := limit.AcquireSameIPActiveNodeLease(user.Email, sourceIP, disconnect)
 			managedWriter.onClose = func() {
 				releaseOnlineIP()
 				releaseActiveNode()
