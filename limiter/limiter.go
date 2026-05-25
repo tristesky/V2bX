@@ -70,11 +70,17 @@ func AddLimiter(tag string, l *conf.LimitConfig, users []panel.UserInfo, aliveLi
 		SameIPActiveNodeID: sameIPActiveNodeID,
 	}
 	sameIPActiveNodeConfig := l.SameIPActiveNodeLimit
+	sameIPActiveNodeConfigSource := "SameIPActiveNodeLimit"
 	if sameIPActiveNodeConfig == nil {
 		sameIPActiveNodeConfig = l.ActiveNodeLimit
+		sameIPActiveNodeConfigSource = "ActiveNodeLimit"
 	}
 	if sameIPActiveNodeConfig != nil {
 		info.SameIPActiveNodeFixedLimit = sameIPActiveNodeConfig.Limit
+	}
+	if (sameIPActiveNodeConfig == nil || !sameIPActiveNodeConfig.Enable) &&
+		l.OnlineIPLimit != nil && l.OnlineIPLimit.Enable {
+		log.WithField("tag", tag).Warn("same-ip active node limiter disabled; OnlineIPLimit does not restrict one source IP using multiple nodes")
 	}
 	uuidmap := make(map[string]int)
 	for i := range users {
@@ -103,6 +109,13 @@ func AddLimiter(tag string, l *conf.LimitConfig, users []panel.UserInfo, aliveLi
 	if err != nil {
 		log.WithField("tag", tag).WithError(err).Warn("init same-ip active node limiter failed, fail-open")
 		activeNodeStore = failOpenActiveNodeStore{}
+	} else if activeNodeStore != nil {
+		log.WithFields(log.Fields{
+			"tag":       tag,
+			"node_id":   sameIPActiveNodeID,
+			"config":    sameIPActiveNodeConfigSource,
+			"fix_limit": info.SameIPActiveNodeFixedLimit,
+		}).Info("same-ip active node limiter enabled")
 	}
 	info.SameIPActiveNodeStore = activeNodeStore
 	info.sameIPActiveNodeLeases = newActiveNodeLeaseTracker(activeNodeStore, sameIPActiveNodeID)

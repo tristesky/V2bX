@@ -45,6 +45,8 @@ uid + source_ip + stable_node_id + active_node_limit -> Redis Lua 原子检查 -
 
 `SameIPActiveNodeLimit.Limit` 为 `0` 时，自动使用面板下发给每个用户的 `device_limit`。例如套餐限制为 `3` 的用户，每一个来源 IP 最多保留 3 个长期活跃节点；套餐限制为 `15` 的用户，每一个来源 IP 最多保留 15 个，无需在节点配置中逐个用户维护数字。
 
+> 这是独立开关：`device_limit` 只提供上限数值，`OnlineIPLimit` 只限制不同来源 IP 数量。只更新 V2bX 二进制或只配置 `OnlineIPLimit`，不会启用同一来源 IP 的多节点限制。
+
 活跃节点使用两阶段策略，减少测速误伤和循环断线：
 
 ```text
@@ -422,6 +424,10 @@ SameIPActiveNodeLimit.IPv6Prefix       IPv6 聚合前缀；留空时继承 Onlin
 ```
 
 修改配置后重启 V2bX。
+
+启动后应在每个参与限制的节点日志中看到 `same-ip active node limiter enabled`。若出现 `same-ip active node limiter disabled; OnlineIPLimit does not restrict one source IP using multiple nodes`，表示该节点只启用了 IP 数限制，无法拦截一个 IP 长期占用多个节点。确认超限时，负责清退的节点会记录 `same-ip active node rejected`；Hysteria2 节点还会记录 `disconnecting hysteria2 client rejected by distributed limit`。
+
+Hysteria2 被清退的 QUIC 来源地址会持续丢包，直到该连接真正触发 `Disconnect` 后才释放本地封禁；这样被判定超限的既有连接不会在固定丢包窗口结束后自行恢复数据传输。
 
 ## 运维建议
 

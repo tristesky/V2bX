@@ -60,12 +60,13 @@ func (l *serverLogger) Connect(addr net.Addr, uuid string, tx uint64) {
 		if userLimit, ok := limiterinfo.UserLimitInfo.Load(format.UserTag(l.Tag, uuid)); ok {
 			userLimit.(*limiter.UserLimitInfo).OverLimit = true
 		}
+		l.blockRejectedConnection(addr, uuid, "connect-check")
 	} else {
 		if userLimit, ok := limiterinfo.UserLimitInfo.Load(format.UserTag(l.Tag, uuid)); ok {
 			userLimit.(*limiter.UserLimitInfo).OverLimit = false
 		}
 		disconnect := func() {
-			l.packetBlocker.Block(addr)
+			l.blockRejectedConnection(addr, uuid, "lease")
 		}
 		releaseOnlineIP := limiterinfo.AcquireOnlineIPLease(taguuid, ip, disconnect)
 		releaseActiveNode := limiterinfo.AcquireSameIPActiveNodeLease(taguuid, ip, disconnect)
@@ -77,8 +78,17 @@ func (l *serverLogger) Connect(addr net.Addr, uuid string, tx uint64) {
 	l.logger.Info("client connected", zap.String("addr", addr.String()), zap.String("uuid", uuid), zap.Uint64("tx", tx))
 }
 
+func (l *serverLogger) blockRejectedConnection(addr net.Addr, uuid string, stage string) {
+	l.logger.Info("disconnecting hysteria2 client rejected by distributed limit",
+		zap.String("stage", stage),
+		zap.String("addr", addr.String()),
+		zap.String("uuid", uuid))
+	l.packetBlocker.Block(addr)
+}
+
 func (l *serverLogger) Disconnect(addr net.Addr, uuid string, err error) {
 	l.releaseOnlineIPLease(addr, uuid)
+	l.packetBlocker.Unblock(addr)
 	l.logger.Info("client disconnected", zap.String("addr", addr.String()), zap.String("uuid", uuid), zap.Error(err))
 }
 

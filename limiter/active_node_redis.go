@@ -384,6 +384,9 @@ func (s *redisActiveNodeStore) Check(identity onlineIPIdentity, ip string, nodeI
 		return activeNodeObserve
 	}
 	s.cacheDecision(cacheKey, result)
+	if result == activeNodeRejected {
+		s.logRejected("check", identity, ip, nodeID, limit, false)
+	}
 	return result
 }
 
@@ -401,6 +404,9 @@ func (s *redisActiveNodeStore) Activate(identity onlineIPIdentity, ip string, no
 		return activeNodeObserve
 	}
 	s.cacheDecision(s.cacheKey(s.redisKey(identity, ip), nodeID, limit), result)
+	if result == activeNodeRejected {
+		s.logRejected("activate", identity, ip, nodeID, limit, true)
+	}
 	return result
 }
 
@@ -414,6 +420,9 @@ func (s *redisActiveNodeStore) Renew(identity onlineIPIdentity, ip string, nodeI
 		return true
 	}
 	s.cacheDecision(s.cacheKey(s.redisKey(identity, ip), nodeID, limit), result)
+	if result == activeNodeRejected {
+		s.logRejected("renew", identity, ip, nodeID, limit, true)
+	}
 	return result != activeNodeRejected
 }
 
@@ -519,6 +528,21 @@ func (s *redisActiveNodeStore) deleteCachedNodeDecisions(key, nodeID string) {
 		}
 		return true
 	})
+}
+
+func (s *redisActiveNodeStore) logRejected(stage string, identity onlineIPIdentity, ip string, nodeID string, limit int, info bool) {
+	fields := log.Fields{
+		"stage":     stage,
+		"uid":       identity.UID,
+		"node_id":   nodeID,
+		"limit":     limit,
+		"redis_key": s.redisKey(identity, ip),
+	}
+	if info {
+		log.WithFields(fields).Info("same-ip active node rejected")
+		return
+	}
+	log.WithFields(fields).Debug("same-ip active node rejected")
 }
 
 func (s *redisActiveNodeStore) markFailure(err error) {

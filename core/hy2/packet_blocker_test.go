@@ -82,4 +82,12 @@ func TestPacketBlockerDropsBlockedRemoteAddr(t *testing.T) {
 	if len(conn.writes) != 1 || conn.writes[0] != allowedAddr.String() {
 		t.Fatalf("underlying writes = %v, want only %s", conn.writes, allowedAddr)
 	}
+
+	blocker.Unblock(blockedAddr)
+	if _, err := blocker.WriteTo([]byte("pass after disconnect"), blockedAddr); err != nil {
+		t.Fatalf("WriteTo(unblocked) error = %v", err)
+	}
+	if len(conn.writes) != 2 || conn.writes[1] != blockedAddr.String() {
+		t.Fatalf("underlying writes after unblock = %v, want write to %s", conn.writes, blockedAddr)
+	}
 }

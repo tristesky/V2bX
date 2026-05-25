@@ -65,6 +65,8 @@ GOEXPERIMENT=jsonv2 go build -v -o build_assets/V2bX -tags "sing xray hysteria2 
 `LimitConfig.OnlineIPLimit` 可以开启基于 Redis 的跨节点在线 IP 限制。不配置或 `Enable` 为 `false` 时保持原有本地限制逻辑。
 `LimitConfig.SameIPActiveNodeLimit` 可以进一步限制同一用户从同一个来源 IP 长期同时使用的节点数量：短时间测速连接不会正式占位，持续超限的节点会被清退并进入冷却拒绝状态。
 
+注意：该策略是独立开关。仅升级程序或仅启用 `OnlineIPLimit` 不会限制“同一个 IP 同时使用多个节点”，所有需要参与判断的节点必须配置并启用 `SameIPActiveNodeLimit`。
+
 推荐使用 Redis 主从 + Sentinel，并让各 V2bX 节点通过 WireGuard/VPN 内网地址连接 Sentinel：
 
 ```json
