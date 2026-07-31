@@ -51,10 +51,28 @@ wget -N https://raw.githubusercontent.com/tristesky/V2bX-script/master/install.s
 [手动安装教程](https://v2bx.v-50.me/v2bx/v2bx-xia-zai-he-an-zhuang/install/manual)
 
 ## 构建
-``` bash
-# 通过-tags选项指定要编译的内核， 可选 xray， sing, hysteria2
-GOEXPERIMENT=jsonv2 go build -v -o build_assets/V2bX -tags "sing xray hysteria2 with_quic with_grpc with_utls with_wireguard with_acme with_gvisor" -trimpath -ldflags "-X 'github.com/InazumaV/V2bX/cmd.version=$version' -s -w -buildid="
+
+需要 Go 1.26 或更高版本。一次构建 Linux x86_64/amd64 和 ARM64/AArch64 两个版本：
+
+```bash
+make build-linux
 ```
+
+生成的文件：
+
+```text
+build_assets/V2bX-linux-amd64
+build_assets/V2bX-linux-arm64
+```
+
+也可以只构建一个架构：
+
+```bash
+make build-linux-amd64
+make build-linux-arm64
+```
+
+Linux 无法使用一个 ELF 二进制同时兼容 x86_64 和 ARM64，因此 GitHub Release 会同时发布两个架构包。使用 Docker Buildx 构建并推送多架构镜像时，可以使用同一个标签，由 Docker 根据宿主机 CPU 拉取对应版本。
 
 ## 配置文件及详细使用教程
 
